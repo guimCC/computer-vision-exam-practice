@@ -16,6 +16,8 @@ BANK_PATH = APP_DIR / "question_bank.json"
 REPORT_PATH = APP_DIR / "build_report.json"
 DB_PATH = APP_DIR / "progress.sqlite3"
 LETTERS = "abcdefghijklmnopqrstuvwxyz"
+LOCAL_USER_ID = "__local_guest__"
+LOCAL_USER_NAME = "Local guest"
 INLINE_MATH_RE = re.compile(r"\\\((.*?)\\\)")
 BLOCK_MATH_RE = re.compile(r"\\\[(.*?)\\\]", re.DOTALL)
 
@@ -234,22 +236,143 @@ def inject_css() -> None:
     )
 
 
-def init_db() -> None:
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS progress (
-                question_id TEXT PRIMARY KEY,
-                attempts INTEGER NOT NULL DEFAULT 0,
-                correct_count INTEGER NOT NULL DEFAULT 0,
-                incorrect_count INTEGER NOT NULL DEFAULT 0,
-                last_result INTEGER,
-                first_seen_at TEXT,
-                last_seen_at TEXT,
-                bookmarked INTEGER NOT NULL DEFAULT 0
-            )
-            """
+def auth_is_configured() -> bool:
+    try:
+        auth_section = st.secrets.get("auth", {})
+    except Exception:
+        return False
+    return bool(auth_section)
+
+
+def current_user_context() -> dict[str, Any]:
+    if not auth_is_configured():
+        return {
+            "requires_login": False,
+            "authenticated": False,
+            "user_id": LOCAL_USER_ID,
+            "display_name": LOCAL_USER_NAME,
+            "email": None,
+        }
+
+    if not getattr(st.user, "is_logged_in", False):
+        return {
+            "requires_login": True,
+            "authenticated": False,
+            "user_id": None,
+            "display_name": None,
+            "email": None,
+        }
+
+    user_data = st.user.to_dict()
+    email = (user_data.get("email") or "").strip().casefold() or None
+    user_id = email or str(user_data.get("sub") or user_data.get("name") or "authenticated-user")
+    display_name = user_data.get("name") or email or "Authenticated user"
+    return {
+        "requires_login": False,
+        "authenticated": True,
+        "user_id": user_id,
+        "display_name": display_name,
+        "email": email,
+    }
+
+
+def render_login_gate() -> None:
+    st.markdown(
+        """
+        <div class="hero">
+            <h1>Sign in to keep your own progress</h1>
+            <p>
+                Use your personal account so your phone and laptop share the same study status
+                while staying separate from everyone else in the class.
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    with st.container(border=True):
+        st.markdown("### Login required")
+        st.write("This hosted app stores progress per signed-in user inside the app database.")
+        st.write("Sign in with your own account to load your bookmarks, mistakes, and confidence ratings.")
+        st.button("Log in", width="stretch", on_click=st.login)
+    st.stop()
+
+
+def ensure_progress_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS progress (
+            user_id TEXT NOT NULL,
+            question_id TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            correct_count INTEGER NOT NULL DEFAULT 0,
+            incorrect_count INTEGER NOT NULL DEFAULT 0,
+            last_result INTEGER,
+            first_seen_at TEXT,
+            last_seen_at TEXT,
+            bookmarked INTEGER NOT NULL DEFAULT 0,
+            confidence_level INTEGER,
+            confidence_updated_at TEXT,
+            PRIMARY KEY (user_id, question_id)
         )
+        """
+    )
+
+
+def init_db(default_user_id: str = LOCAL_USER_ID) -> None:
+    with sqlite3.connect(DB_PATH) as conn:
+        table_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'progress'"
+        ).fetchone()
+
+        if not table_exists:
+            ensure_progress_table(conn)
+        else:
+            table_info = list(conn.execute("PRAGMA table_info(progress)"))
+            columns = {row[1] for row in table_info}
+            primary_key_columns = [row[1] for row in sorted(table_info, key=lambda row: row[5]) if row[5]]
+
+            if "user_id" not in columns or primary_key_columns != ["user_id", "question_id"]:
+                conn.execute("ALTER TABLE progress RENAME TO progress_legacy")
+                ensure_progress_table(conn)
+
+                legacy_columns = {row[1] for row in conn.execute("PRAGMA table_info(progress_legacy)")}
+
+                def legacy_col(name: str, fallback: str) -> str:
+                    return name if name in legacy_columns else fallback
+
+                conn.execute(
+                    f"""
+                    INSERT INTO progress (
+                        user_id,
+                        question_id,
+                        attempts,
+                        correct_count,
+                        incorrect_count,
+                        last_result,
+                        first_seen_at,
+                        last_seen_at,
+                        bookmarked,
+                        confidence_level,
+                        confidence_updated_at
+                    )
+                    SELECT
+                        ?,
+                        question_id,
+                        {legacy_col("attempts", "0")},
+                        {legacy_col("correct_count", "0")},
+                        {legacy_col("incorrect_count", "0")},
+                        {legacy_col("last_result", "NULL")},
+                        {legacy_col("first_seen_at", "NULL")},
+                        {legacy_col("last_seen_at", "NULL")},
+                        {legacy_col("bookmarked", "0")},
+                        {legacy_col("confidence_level", "NULL")},
+                        {legacy_col("confidence_updated_at", "NULL")}
+                    FROM progress_legacy
+                    """,
+                    (default_user_id,),
+                )
+                conn.execute("DROP TABLE progress_legacy")
+
         columns = {row[1] for row in conn.execute("PRAGMA table_info(progress)")}
         if "confidence_level" not in columns:
             conn.execute("ALTER TABLE progress ADD COLUMN confidence_level INTEGER")
@@ -269,28 +392,28 @@ def load_report() -> dict[str, Any]:
     return json.loads(REPORT_PATH.read_text(encoding="utf-8"))
 
 
-def load_progress() -> dict[str, dict[str, Any]]:
+def load_progress(user_id: str) -> dict[str, dict[str, Any]]:
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
-        rows = conn.execute("SELECT * FROM progress").fetchall()
+        rows = conn.execute("SELECT * FROM progress WHERE user_id = ?", (user_id,)).fetchall()
     return {row["question_id"]: dict(row) for row in rows}
 
 
-def ensure_progress_row(question_id: str) -> None:
+def ensure_progress_row(user_id: str, question_id: str) -> None:
     now = utc_now()
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
             """
-            INSERT INTO progress (question_id, first_seen_at, last_seen_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(question_id) DO NOTHING
+            INSERT INTO progress (user_id, question_id, first_seen_at, last_seen_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id, question_id) DO NOTHING
             """,
-            (question_id, now, now),
+            (user_id, question_id, now, now),
         )
 
 
-def record_attempt(question_id: str, is_correct: bool) -> None:
-    ensure_progress_row(question_id)
+def record_attempt(user_id: str, question_id: str, is_correct: bool) -> None:
+    ensure_progress_row(user_id, question_id)
     now = utc_now()
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
@@ -302,7 +425,7 @@ def record_attempt(question_id: str, is_correct: bool) -> None:
                 last_result = ?,
                 first_seen_at = COALESCE(first_seen_at, ?),
                 last_seen_at = ?
-            WHERE question_id = ?
+            WHERE user_id = ? AND question_id = ?
             """,
             (
                 1 if is_correct else 0,
@@ -310,22 +433,23 @@ def record_attempt(question_id: str, is_correct: bool) -> None:
                 1 if is_correct else 0,
                 now,
                 now,
+                user_id,
                 question_id,
             ),
         )
 
 
-def set_bookmark(question_id: str, bookmarked: bool) -> None:
-    ensure_progress_row(question_id)
+def set_bookmark(user_id: str, question_id: str, bookmarked: bool) -> None:
+    ensure_progress_row(user_id, question_id)
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
-            "UPDATE progress SET bookmarked = ?, last_seen_at = ? WHERE question_id = ?",
-            (1 if bookmarked else 0, utc_now(), question_id),
+            "UPDATE progress SET bookmarked = ?, last_seen_at = ? WHERE user_id = ? AND question_id = ?",
+            (1 if bookmarked else 0, utc_now(), user_id, question_id),
         )
 
 
-def set_confidence(question_id: str, confidence_level: int) -> None:
-    ensure_progress_row(question_id)
+def set_confidence(user_id: str, question_id: str, confidence_level: int) -> None:
+    ensure_progress_row(user_id, question_id)
     now = utc_now()
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
@@ -334,9 +458,9 @@ def set_confidence(question_id: str, confidence_level: int) -> None:
             SET confidence_level = ?,
                 confidence_updated_at = ?,
                 last_seen_at = ?
-            WHERE question_id = ?
+            WHERE user_id = ? AND question_id = ?
             """,
-            (confidence_level, now, now, question_id),
+            (confidence_level, now, now, user_id, question_id),
         )
 
 
@@ -825,7 +949,12 @@ def render_stats(bank: list[dict[str, Any]], progress: dict[str, dict[str, Any]]
     st.caption(f"Bookmarked items: {bookmarked_count}")
 
 
-def render_overview(bank: list[dict[str, Any]], progress: dict[str, dict[str, Any]], report: dict[str, Any]) -> None:
+def render_overview(
+    bank: list[dict[str, Any]],
+    progress: dict[str, dict[str, Any]],
+    report: dict[str, Any],
+    user_context: dict[str, Any],
+) -> None:
     summary = report.get("summary", {})
     mcq_items = [item for item in bank if item["type"] == "multiple_choice"]
     problem_items = [item for item in bank if item["type"] == "open_response"]
@@ -846,6 +975,10 @@ def render_overview(bank: list[dict[str, Any]], progress: dict[str, dict[str, An
     )
 
     render_stats(bank, progress)
+    if user_context["authenticated"]:
+        st.caption(f"Progress account: {user_context['display_name']} ({user_context['email']})")
+    else:
+        st.caption("Progress account: local guest mode")
 
     render_page_heading(
         "Overview",
@@ -908,7 +1041,11 @@ def render_overview(bank: list[dict[str, Any]], progress: dict[str, dict[str, An
         st.dataframe(category_summary, width="stretch", hide_index=True)
 
 
-def render_browser_page(bank: list[dict[str, Any]], progress: dict[str, dict[str, Any]]) -> None:
+def render_browser_page(
+    bank: list[dict[str, Any]],
+    progress: dict[str, dict[str, Any]],
+    user_context: dict[str, Any],
+) -> None:
     categories = all_categories(bank)
     years = all_years(bank)
 
@@ -1061,7 +1198,12 @@ def show_mcq_feedback(item: dict[str, Any], feedback: dict[str, Any] | None) -> 
         render_rich_text(item["solution_text"])
 
 
-def render_mcq_page(bank: list[dict[str, Any]], progress: dict[str, dict[str, Any]], report: dict[str, Any]) -> None:
+def render_mcq_page(
+    bank: list[dict[str, Any]],
+    progress: dict[str, dict[str, Any]],
+    report: dict[str, Any],
+    user_id: str,
+) -> None:
     st.sidebar.subheader("Multiple choice")
     st.sidebar.selectbox("Pool", ["All", "Unseen", "Failed only", "Bookmarked"], key="mcq_mode")
     st.sidebar.multiselect("Categories", all_categories(bank), key="mcq_categories")
@@ -1134,7 +1276,7 @@ def render_mcq_page(bank: list[dict[str, Any]], progress: dict[str, dict[str, An
     with nav2:
         bookmark_label = "Remove bookmark" if q_progress["bookmarked"] else "Bookmark"
         if st.button(bookmark_label, width="stretch"):
-            set_bookmark(item["id"], not bool(q_progress["bookmarked"]))
+            set_bookmark(user_id, item["id"], not bool(q_progress["bookmarked"]))
             st.rerun()
     with nav3:
         if st.button("Next", disabled=st.session_state.mcq_index >= len(pool) - 1, width="stretch"):
@@ -1171,7 +1313,7 @@ def render_mcq_page(bank: list[dict[str, Any]], progress: dict[str, dict[str, An
                     st.warning("Select an answer before submitting.")
                 else:
                     is_correct = set(chosen) == set(item["answer_letters"])
-                    record_attempt(item["id"], is_correct)
+                    record_attempt(user_id, item["id"], is_correct)
                     if not is_correct and item["id"] not in st.session_state.mcq_missed_ids:
                         st.session_state.mcq_missed_ids.append(item["id"])
                     st.session_state.mcq_feedback = {
@@ -1184,7 +1326,11 @@ def render_mcq_page(bank: list[dict[str, Any]], progress: dict[str, dict[str, An
     show_mcq_feedback(item, st.session_state.mcq_feedback)
 
 
-def render_problem_page(bank: list[dict[str, Any]], progress: dict[str, dict[str, Any]]) -> None:
+def render_problem_page(
+    bank: list[dict[str, Any]],
+    progress: dict[str, dict[str, Any]],
+    user_id: str,
+) -> None:
     st.sidebar.subheader("Problems")
     st.sidebar.selectbox(
         "Problem filter",
@@ -1245,7 +1391,7 @@ def render_problem_page(bank: list[dict[str, Any]], progress: dict[str, dict[str
     with nav3:
         bookmark_label = "Remove bookmark" if q_progress["bookmarked"] else "Bookmark"
         if st.button(bookmark_label, width="stretch"):
-            set_bookmark(item["id"], not bool(q_progress["bookmarked"]))
+            set_bookmark(user_id, item["id"], not bool(q_progress["bookmarked"]))
             st.rerun()
     with nav4:
         if st.button("Next", disabled=st.session_state.problem_index >= len(pool) - 1, width="stretch"):
@@ -1278,14 +1424,18 @@ def render_problem_page(bank: list[dict[str, Any]], progress: dict[str, dict[str
                 key=slider_key,
             )
             if st.button("Save confidence", width="stretch"):
-                set_confidence(item["id"], int(st.session_state[slider_key]))
+                set_confidence(user_id, item["id"], int(st.session_state[slider_key]))
                 st.rerun()
 
 
 def main() -> None:
     st.set_page_config(page_title="Exam Practice", layout="wide")
     inject_css()
-    init_db()
+    user_context = current_user_context()
+    if user_context["requires_login"]:
+        render_login_gate()
+
+    init_db(user_context["user_id"])
     init_session_state()
 
     bank = load_bank()
@@ -1295,9 +1445,17 @@ def main() -> None:
         st.error("`question_bank.json` is missing. Run `./.venv/bin/python study_tool/build_bank.py` first.")
         return
 
-    progress = load_progress()
+    progress = load_progress(user_context["user_id"])
 
     st.sidebar.header("Navigation")
+    if user_context["authenticated"]:
+        st.sidebar.caption(f"Signed in as {user_context['display_name']}")
+        if user_context["email"]:
+            st.sidebar.caption(user_context["email"])
+        st.sidebar.button("Log out", width="stretch", on_click=st.logout)
+    else:
+        st.sidebar.caption("Local guest mode")
+        st.sidebar.caption("Configure Streamlit auth in secrets to sync progress across devices.")
     st.sidebar.caption("Start on the overview, then move into the section you want to drill.")
     selected_section = st.sidebar.radio(
         "Section",
@@ -1308,13 +1466,13 @@ def main() -> None:
         st.session_state.nav_section = selected_section
 
     if st.session_state.nav_section == "Overview":
-        render_overview(bank, progress, report)
+        render_overview(bank, progress, report, user_context)
     elif st.session_state.nav_section == "Question browser":
-        render_browser_page(bank, progress)
+        render_browser_page(bank, progress, user_context)
     elif st.session_state.nav_section == "Multiple choice":
-        render_mcq_page(bank, progress, report)
+        render_mcq_page(bank, progress, report, user_context["user_id"])
     else:
-        render_problem_page(bank, progress)
+        render_problem_page(bank, progress, user_context["user_id"])
 
 
 if __name__ == "__main__":

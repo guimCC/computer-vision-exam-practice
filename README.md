@@ -13,6 +13,15 @@ Deploy-only package for the mobile-friendly Streamlit version of the exam study 
 
 This folder intentionally does **not** include the raw `exams/` source material or the local progress database.
 
+## How progress works
+
+- If authentication is configured, progress is stored per signed-in user.
+- That means the same person can keep the same study status on laptop and phone.
+- Classmates do **not** share progress with each other as long as they log in with different accounts.
+- The app still uses a shared SQLite file on the server, but each row is keyed by both `user_id` and `question_id`.
+
+This is a lightweight setup. It avoids a hosted database, but it should still be treated as best-effort server-side storage.
+
 ## Local run
 
 ```bash
@@ -65,8 +74,57 @@ git push -u origin main
 
 After that you will get a hosted URL you can open from your phone.
 
+## Turn on login so progress is private per user
+
+Use Streamlit's built-in authentication with Google OIDC.
+
+Reference APIs:
+
+- [st.login / st.logout / st.user](https://docs.streamlit.io/develop/api-reference/user)
+- [Authentication concepts](https://docs.streamlit.io/develop/concepts/connections/authentication)
+
+### 1. Create a Google OAuth client
+
+In Google Cloud:
+
+- create an OAuth client of type `Web application`
+- add the authorized redirect URI:
+
+```text
+https://YOUR-APP-URL.streamlit.app/oauth2callback
+```
+
+Use the final deployed Streamlit app URL there.
+
+### 2. Add Streamlit secrets
+
+In Streamlit Community Cloud, open the app settings and add secrets based on:
+
+- `.streamlit/secrets.example.toml`
+
+Template:
+
+```toml
+[auth]
+redirect_uri = "https://YOUR-APP-URL.streamlit.app/oauth2callback"
+cookie_secret = "replace-with-a-long-random-secret"
+client_id = "your-google-oauth-client-id"
+client_secret = "your-google-oauth-client-secret"
+server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
+```
+
+### 3. Redeploy
+
+After secrets are added, redeploy the app.
+
+Once enabled:
+
+- you sign in with the same account on laptop and phone -> same progress
+- teammates sign in with their own accounts -> separate progress
+- if auth is not configured, the app falls back to a local guest mode
+
 ## Important note about progress
 
 The app stores progress in `progress.sqlite3`.
 
-On hosted Streamlit this is acceptable for a lightweight personal setup, but you should treat it as best-effort state, not guaranteed durable storage. If you want robust long-term mobile progress, the next improvement would be moving progress to a hosted database or browser-local persistence.
+On hosted Streamlit this is acceptable for a lightweight personal setup, but you should treat it as best-effort state, not guaranteed durable storage. If you ever want stronger durability, the next step would be moving progress to a hosted database.
