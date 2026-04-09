@@ -1,0 +1,31 @@
+{
+  "warnings": [],
+  "summary": {
+    "generated_at": "2026-04-09T07:29:01+00:00",
+    "source_item_count": 402,
+    "deduplicated_item_count": 386,
+    "source_multiple_choice": 370,
+    "source_open_response": 32,
+    "deduplicated_multiple_choice": 354,
+    "deduplicated_open_response": 32,
+    "warnings": 0,
+    "quiz_files": 18,
+    "exam_solution_files": 7,
+    "exam_pdf_files": 7,
+    "generated_problem_images": 8,
+    "primary_category_counts": {
+      "Color and color spaces": 56,
+      "Filtering, convolution and edges": 51,
+      "Fourier, frequency and texture": 42,
+      "Geometric transforms, projection and registration": 36,
+      "Human vision and visible light": 18,
+      "Miscellaneous concepts": 14,
+      "Morphology and segmentation": 58,
+      "Motion and background analysis": 8,
+      "Optics and image formation": 37,
+      "Programming and MATLAB": 2,
+      "Representation and point/intensity operations": 19,
+      "Sensors and acquisition": 45
+    }
+  }
+}

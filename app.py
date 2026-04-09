@@ -1,0 +1,1321 @@
+from __future__ import annotations
+import json
+import random
+import re
+import sqlite3
+from collections import Counter
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import streamlit as st
+
+
+APP_DIR = Path(__file__).resolve().parent
+BANK_PATH = APP_DIR / "question_bank.json"
+REPORT_PATH = APP_DIR / "build_report.json"
+DB_PATH = APP_DIR / "progress.sqlite3"
+LETTERS = "abcdefghijklmnopqrstuvwxyz"
+INLINE_MATH_RE = re.compile(r"\\\((.*?)\\\)")
+BLOCK_MATH_RE = re.compile(r"\\\[(.*?)\\\]", re.DOTALL)
+
+
+def utc_now() -> str:
+    return datetime.now(UTC).replace(microsecond=0).isoformat()
+
+
+def inject_css() -> None:
+    st.markdown(
+        """
+        <style>
+        :root {
+            --app-bg: #070b10;
+            --app-bg-soft: #0d131c;
+            --panel: rgba(14, 20, 29, 0.86);
+            --panel-strong: rgba(18, 26, 38, 0.96);
+            --panel-muted: rgba(24, 35, 50, 0.86);
+            --border: #223243;
+            --border-strong: #2f455d;
+            --text: #eef4fb;
+            --muted: #9cb0c5;
+            --accent: #8dd4c5;
+            --accent-strong: #76c8ef;
+            --accent-text: #051019;
+            --warm: #f3c77f;
+            --success: #8fd0a8;
+            --shadow: 0 16px 44px rgba(0, 0, 0, 0.32);
+        }
+        .stApp {
+            background:
+                radial-gradient(circle at top left, rgba(118, 200, 239, 0.16) 0%, transparent 26%),
+                radial-gradient(circle at top right, rgba(141, 212, 197, 0.12) 0%, transparent 22%),
+                linear-gradient(180deg, #0e141d 0%, var(--app-bg) 42%, #05070b 100%);
+            color: var(--text);
+        }
+        [data-testid="stSidebar"] {
+            background: linear-gradient(180deg, #0b1118 0%, #090e14 100%);
+            border-right: 1px solid var(--border);
+        }
+        [data-testid="stSidebar"] * {
+            color: var(--text) !important;
+        }
+        .block-container {
+            max-width: 1024px;
+            padding-top: 1.35rem;
+            padding-bottom: 2.6rem;
+        }
+        .hero {
+            background: linear-gradient(135deg, rgba(118, 200, 239, 0.14) 0%, rgba(141, 212, 197, 0.08) 100%);
+            border: 1px solid var(--border-strong);
+            border-radius: 22px;
+            padding: 1.5rem 1.7rem;
+            margin-bottom: 0.9rem;
+            box-shadow: var(--shadow);
+            backdrop-filter: blur(8px);
+        }
+        .hero h1 {
+            margin: 0 0 0.45rem 0;
+            font-size: 2.2rem;
+            line-height: 1.1;
+            color: var(--text);
+        }
+        .hero p {
+            margin: 0;
+            color: var(--muted);
+            font-size: 1rem;
+            line-height: 1.62;
+        }
+        .section-kicker {
+            text-transform: uppercase;
+            letter-spacing: 0.12em;
+            font-size: 0.82rem;
+            font-weight: 700;
+            color: var(--accent-strong);
+            margin-bottom: 0.28rem;
+        }
+        .section-title {
+            font-size: 1.8rem;
+            font-weight: 700;
+            margin-bottom: 0.2rem;
+            color: var(--text);
+        }
+        .section-subtitle {
+            color: var(--muted);
+            font-size: 0.98rem;
+            margin-bottom: 0.9rem;
+        }
+        .badge-row {
+            margin: 0.25rem 0 0.9rem 0;
+        }
+        .badge {
+            display: inline-block;
+            padding: 0.36rem 0.7rem;
+            border-radius: 999px;
+            margin: 0 0.45rem 0.45rem 0;
+            border: 1px solid var(--border);
+            background: rgba(22, 31, 44, 0.78);
+            color: var(--text);
+            font-size: 0.83rem;
+            font-weight: 600;
+        }
+        .badge.cool {
+            background: rgba(118, 200, 239, 0.14);
+            border-color: rgba(118, 200, 239, 0.35);
+            color: #b4e3f7;
+        }
+        .badge.warm {
+            background: rgba(243, 199, 127, 0.14);
+            border-color: rgba(243, 199, 127, 0.34);
+            color: #ffdca7;
+        }
+        .badge.success {
+            background: rgba(143, 208, 168, 0.14);
+            border-color: rgba(143, 208, 168, 0.34);
+            color: #bbe7ca;
+        }
+        [data-testid="stMetric"] {
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 18px;
+            padding: 0.75rem 0.9rem;
+            box-shadow: none;
+        }
+        [data-testid="stMetricValue"] {
+            color: var(--text);
+        }
+        [data-testid="stMetricLabel"],
+        [data-testid="stMetricDelta"],
+        [data-testid="stCaptionContainer"] {
+            color: var(--muted) !important;
+        }
+        [data-testid="stVerticalBlockBorderWrapper"] {
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 18px;
+            box-shadow: none;
+        }
+        [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stMarkdownContainer"] p,
+        [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stMarkdownContainer"] li {
+            font-size: 1rem;
+            line-height: 1.72;
+            color: var(--text);
+        }
+        [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
+        [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] li,
+        [data-testid="stSidebar"] label,
+        [data-testid="stSidebar"] p {
+            color: var(--text) !important;
+        }
+        div[data-baseweb="radio"] > div label,
+        div[data-baseweb="checkbox"] > div label {
+            background: rgba(17, 25, 36, 0.78);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 0.72rem 0.86rem;
+            margin-bottom: 0.48rem;
+        }
+        div[data-baseweb="radio"] > div label:hover,
+        div[data-baseweb="checkbox"] > div label:hover {
+            border-color: var(--accent-strong);
+            background: rgba(28, 43, 62, 0.9);
+        }
+        div[data-baseweb="radio"] > div label p,
+        div[data-baseweb="checkbox"] > div label p {
+            font-size: 0.98rem;
+            line-height: 1.45;
+            color: var(--text) !important;
+        }
+        [data-testid="stButton"] button,
+        [data-testid="stFormSubmitButton"] button {
+            background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 100%);
+            color: var(--accent-text) !important;
+            border: none;
+            border-radius: 14px;
+            font-weight: 700;
+            min-height: 2.8rem;
+            box-shadow: 0 12px 28px rgba(15, 27, 39, 0.24);
+        }
+        [data-testid="stButton"] button:hover,
+        [data-testid="stFormSubmitButton"] button:hover {
+            background: linear-gradient(135deg, #9fe0d2 0%, #88d2f7 100%);
+            color: #031019 !important;
+            transform: translateY(-1px);
+        }
+        [data-testid="stButton"] button:focus,
+        [data-testid="stFormSubmitButton"] button:focus {
+            box-shadow: 0 0 0 0.16rem rgba(136, 210, 247, 0.32);
+        }
+        [data-testid="stButton"] button:disabled,
+        [data-testid="stFormSubmitButton"] button:disabled {
+            background: rgba(79, 92, 107, 0.46);
+            color: rgba(226, 234, 243, 0.56) !important;
+            box-shadow: none;
+            transform: none;
+        }
+        [data-testid="stSelectbox"] label,
+        [data-testid="stRadio"] label,
+        [data-testid="stMultiSelect"] label {
+            color: var(--text) !important;
+        }
+        [data-testid="stSelectbox"] [data-baseweb="select"] > div,
+        [data-testid="stMultiSelect"] [data-baseweb="select"] > div {
+            background: rgba(17, 25, 36, 0.86);
+            border-color: var(--border);
+        }
+        h1, h2, h3, h4, h5, h6 {
+            color: var(--text);
+        }
+        a {
+            color: #9dd7ff !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def init_db() -> None:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS progress (
+                question_id TEXT PRIMARY KEY,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                correct_count INTEGER NOT NULL DEFAULT 0,
+                incorrect_count INTEGER NOT NULL DEFAULT 0,
+                last_result INTEGER,
+                first_seen_at TEXT,
+                last_seen_at TEXT,
+                bookmarked INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(progress)")}
+        if "confidence_level" not in columns:
+            conn.execute("ALTER TABLE progress ADD COLUMN confidence_level INTEGER")
+        if "confidence_updated_at" not in columns:
+            conn.execute("ALTER TABLE progress ADD COLUMN confidence_updated_at TEXT")
+
+
+def load_bank() -> list[dict[str, Any]]:
+    if not BANK_PATH.exists():
+        return []
+    return json.loads(BANK_PATH.read_text(encoding="utf-8"))
+
+
+def load_report() -> dict[str, Any]:
+    if not REPORT_PATH.exists():
+        return {}
+    return json.loads(REPORT_PATH.read_text(encoding="utf-8"))
+
+
+def load_progress() -> dict[str, dict[str, Any]]:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT * FROM progress").fetchall()
+    return {row["question_id"]: dict(row) for row in rows}
+
+
+def ensure_progress_row(question_id: str) -> None:
+    now = utc_now()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT INTO progress (question_id, first_seen_at, last_seen_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(question_id) DO NOTHING
+            """,
+            (question_id, now, now),
+        )
+
+
+def record_attempt(question_id: str, is_correct: bool) -> None:
+    ensure_progress_row(question_id)
+    now = utc_now()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            UPDATE progress
+            SET attempts = attempts + 1,
+                correct_count = correct_count + ?,
+                incorrect_count = incorrect_count + ?,
+                last_result = ?,
+                first_seen_at = COALESCE(first_seen_at, ?),
+                last_seen_at = ?
+            WHERE question_id = ?
+            """,
+            (
+                1 if is_correct else 0,
+                0 if is_correct else 1,
+                1 if is_correct else 0,
+                now,
+                now,
+                question_id,
+            ),
+        )
+
+
+def set_bookmark(question_id: str, bookmarked: bool) -> None:
+    ensure_progress_row(question_id)
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "UPDATE progress SET bookmarked = ?, last_seen_at = ? WHERE question_id = ?",
+            (1 if bookmarked else 0, utc_now(), question_id),
+        )
+
+
+def set_confidence(question_id: str, confidence_level: int) -> None:
+    ensure_progress_row(question_id)
+    now = utc_now()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            UPDATE progress
+            SET confidence_level = ?,
+                confidence_updated_at = ?,
+                last_seen_at = ?
+            WHERE question_id = ?
+            """,
+            (confidence_level, now, now, question_id),
+        )
+
+
+def render_rich_text(text: str) -> None:
+    if not text:
+        return
+    text = BLOCK_MATH_RE.sub(lambda match: f"\n\n$$ {match.group(1).strip()} $$\n\n", text)
+    text = INLINE_MATH_RE.sub(lambda match: f"${match.group(1).strip()}$", text)
+    st.markdown(text)
+
+
+def render_preserved_text(text: str) -> None:
+    if not text:
+        return
+    text = BLOCK_MATH_RE.sub(lambda match: f"\n\n$$ {match.group(1).strip()} $$\n\n", text)
+    text = INLINE_MATH_RE.sub(lambda match: f"${match.group(1).strip()}$", text)
+    paragraphs = [block.strip() for block in text.split("\n\n") if block.strip()]
+    if not paragraphs:
+        return
+
+    for block in paragraphs:
+        lines = [line.rstrip() for line in block.splitlines()]
+        markdown_like = all(
+            line.startswith(("* ", "- "))
+            or re.match(r"^\d+\.\s", line)
+            or re.match(r"^[a-zA-Z]\)\s", line)
+            for line in lines
+            if line.strip()
+        )
+        rendered = block if markdown_like else block.replace("\n", "  \n")
+        st.markdown(rendered)
+
+
+def render_item_images(item: dict[str, Any]) -> None:
+    image_paths = item.get("image_paths") or []
+    if not image_paths:
+        return
+    st.markdown("**Associated images**")
+    for image_path in image_paths:
+        full_path = APP_DIR / image_path
+        if full_path.exists():
+            left, mid, right = st.columns([1.1, 1.45, 1.1])
+            with mid:
+                st.image(str(full_path), width=320)
+
+
+def progress_for(progress: dict[str, dict[str, Any]], question_id: str) -> dict[str, Any]:
+    return progress.get(
+        question_id,
+        {
+            "attempts": 0,
+            "correct_count": 0,
+            "incorrect_count": 0,
+            "last_result": None,
+            "bookmarked": 0,
+            "confidence_level": None,
+            "confidence_updated_at": None,
+        },
+    )
+
+
+def option_letter(index: int) -> str:
+    return LETTERS[index]
+
+
+def choice_label(item: dict[str, Any], letter: str) -> str:
+    index = LETTERS.index(letter)
+    return f"{letter}) {item['options'][index]}"
+
+
+def source_label(item: dict[str, Any]) -> str:
+    source = item["sources"][0]
+    kind = source.get("kind")
+    if kind == "exam_theory":
+        return f"Exam {source.get('year')} · Theory Q{source.get('question_number')}"
+    if kind == "exam_problem":
+        return f"Exam {source.get('year')} · Problem {source.get('problem_number')}"
+    if kind == "quiz_html":
+        return f"{source.get('title', 'Quiz')} · Q{source.get('question_number')}"
+    return source.get("path", "Source")
+
+
+def source_group(item: dict[str, Any]) -> str:
+    kind = item["sources"][0].get("kind")
+    if kind == "quiz_html":
+        return "Quiz"
+    if kind in {"exam_theory", "exam_problem"}:
+        return "Exam"
+    return "Other"
+
+
+def year_label(item: dict[str, Any]) -> str | None:
+    for tag in item.get("tags", []):
+        if tag.startswith("year:"):
+            return tag.split(":", 1)[1]
+    return None
+
+
+def item_categories(item: dict[str, Any]) -> list[str]:
+    if item.get("categories"):
+        return item["categories"]
+    if item.get("primary_category"):
+        return [item["primary_category"]]
+    return ["Miscellaneous concepts"]
+
+
+def primary_category(item: dict[str, Any]) -> str:
+    return item.get("primary_category") or item_categories(item)[0]
+
+
+def all_categories(bank: list[dict[str, Any]]) -> list[str]:
+    counts = Counter(primary_category(item) for item in bank)
+    return [category for category, _ in sorted(counts.items(), key=lambda entry: (-entry[1], entry[0]))]
+
+
+def all_years(bank: list[dict[str, Any]]) -> list[str]:
+    years = sorted({year for item in bank if (year := year_label(item))})
+    return years
+
+
+def item_has_activity(progress_row: dict[str, Any]) -> bool:
+    return bool(
+        progress_row["attempts"]
+        or progress_row["bookmarked"]
+        or progress_row["confidence_level"] is not None
+    )
+
+
+def matches_category_filter(item: dict[str, Any], selected_categories: list[str]) -> bool:
+    return not selected_categories or bool(set(item_categories(item)) & set(selected_categories))
+
+
+def prompt_preview(text: str, limit: int = 110) -> str:
+    compact = " ".join(text.split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 1].rstrip() + "…"
+
+
+def browser_option_label(item: dict[str, Any]) -> str:
+    kind = "MCQ" if item["type"] == "multiple_choice" else "Problem"
+    return f"{kind} · {primary_category(item)} · {source_label(item)}"
+
+
+def confidence_label(value: int | None) -> str:
+    labels = {
+        1: "1 · No clue",
+        2: "2 · Shaky",
+        3: "3 · Partial",
+        4: "4 · Solid",
+        5: "5 · Ready",
+    }
+    return labels.get(value, "Unrated")
+
+
+def render_badges(labels: list[tuple[str, str]]) -> None:
+    if not labels:
+        return
+    html = '<div class="badge-row">' + "".join(
+        f'<span class="badge {tone}">{label}</span>' for label, tone in labels
+    ) + "</div>"
+    st.markdown(html, unsafe_allow_html=True)
+
+
+def build_mcq_pool(
+    items: list[dict[str, Any]],
+    progress: dict[str, dict[str, Any]],
+    mode: str,
+    session_subset_ids: list[str] | None,
+    selected_categories: list[str],
+) -> list[dict[str, Any]]:
+    pool = [item for item in items if item["type"] == "multiple_choice"]
+    pool = [item for item in pool if matches_category_filter(item, selected_categories)]
+
+    if mode == "Unseen":
+        pool = [item for item in pool if progress_for(progress, item["id"])["attempts"] == 0]
+    elif mode == "Failed only":
+        pool = [item for item in pool if progress_for(progress, item["id"])["incorrect_count"] > 0]
+    elif mode == "Bookmarked":
+        pool = [item for item in pool if progress_for(progress, item["id"])["bookmarked"]]
+
+    if session_subset_ids is not None:
+        subset = set(session_subset_ids)
+        pool = [item for item in pool if item["id"] in subset]
+
+    rng = random.Random(st.session_state.mcq_seed)
+    pool = list(pool)
+    rng.shuffle(pool)
+    return pool
+
+
+def problem_sort_key(item: dict[str, Any]) -> tuple[Any, ...]:
+    source = item["sources"][0]
+    year = source.get("year", "9999")
+    number = source.get("problem_number", 999)
+    return (year, number, item["question"])
+
+
+def build_problem_pool(
+    items: list[dict[str, Any]],
+    progress: dict[str, dict[str, Any]],
+    mode: str,
+    selected_categories: list[str],
+) -> list[dict[str, Any]]:
+    pool = [item for item in items if item["type"] == "open_response"]
+    pool = [item for item in pool if matches_category_filter(item, selected_categories)]
+
+    if mode == "No confidence yet":
+        pool = [item for item in pool if progress_for(progress, item["id"])["confidence_level"] is None]
+    elif mode == "Low confidence (1-2)":
+        pool = [item for item in pool if (progress_for(progress, item["id"])["confidence_level"] or 99) <= 2]
+    elif mode == "Bookmarked":
+        pool = [item for item in pool if progress_for(progress, item["id"])["bookmarked"]]
+    elif mode == "With images":
+        pool = [item for item in pool if item.get("image_paths")]
+    elif mode == "With stored solution":
+        pool = [item for item in pool if item.get("solution_text")]
+
+    return sorted(pool, key=problem_sort_key)
+
+
+def init_session_state() -> None:
+    defaults = {
+        "nav_section": "Overview",
+        "mcq_mode": "All",
+        "mcq_categories": [],
+        "problem_mode": "All problems",
+        "problem_categories": [],
+        "browser_type": "All",
+        "browser_sources": [],
+        "browser_years": [],
+        "browser_categories": [],
+        "browser_progress": "All",
+        "browser_search": "",
+        "browser_current_id": None,
+        "mcq_seed": random.randrange(1_000_000_000),
+        "mcq_index": 0,
+        "mcq_pool_signature": "",
+        "mcq_current_id": None,
+        "mcq_subset_ids": None,
+        "mcq_missed_ids": [],
+        "mcq_feedback": None,
+        "problem_index": 0,
+        "problem_pool_signature": "",
+        "problem_current_id": None,
+        "problem_show_solution_for": None,
+    }
+    for key, value in defaults.items():
+        st.session_state.setdefault(key, value)
+
+
+def reset_mcq(clear_subset: bool) -> None:
+    st.session_state.mcq_index = 0
+    st.session_state.mcq_seed = random.randrange(1_000_000_000)
+    st.session_state.mcq_feedback = None
+    if clear_subset:
+        st.session_state.mcq_subset_ids = None
+        st.session_state.mcq_missed_ids = []
+
+
+def reset_problem() -> None:
+    st.session_state.problem_index = 0
+    st.session_state.problem_show_solution_for = None
+
+
+def go_to_section(section: str) -> None:
+    st.session_state.nav_section = section
+
+
+def go_to_failed_mcq() -> None:
+    st.session_state.nav_section = "Multiple choice"
+    st.session_state.mcq_mode = "Failed only"
+    st.session_state.mcq_categories = []
+    reset_mcq(clear_subset=False)
+
+
+def open_mcq_focus(question_id: str) -> None:
+    st.session_state.nav_section = "Multiple choice"
+    st.session_state.mcq_mode = "All"
+    st.session_state.mcq_categories = []
+    st.session_state.mcq_subset_ids = [question_id]
+    st.session_state.mcq_feedback = None
+    st.session_state.mcq_seed = random.randrange(1_000_000_000)
+    st.session_state.mcq_current_id = question_id
+    st.session_state.mcq_index = 0
+
+
+def open_problem_focus(question_id: str) -> None:
+    st.session_state.nav_section = "Problems"
+    st.session_state.problem_mode = "All problems"
+    st.session_state.problem_categories = []
+    st.session_state.problem_current_id = question_id
+    st.session_state.problem_index = 0
+    st.session_state.problem_show_solution_for = None
+
+
+def sync_mcq_state(pool: list[dict[str, Any]]) -> None:
+    pool_signature = "|".join(item["id"] for item in pool)
+    if pool_signature != st.session_state.mcq_pool_signature:
+        current_id = st.session_state.mcq_current_id
+        st.session_state.mcq_pool_signature = pool_signature
+        if current_id and current_id in {item["id"] for item in pool}:
+            st.session_state.mcq_index = [item["id"] for item in pool].index(current_id)
+        else:
+            st.session_state.mcq_index = 0
+
+    if pool:
+        st.session_state.mcq_index = max(0, min(st.session_state.mcq_index, len(pool) - 1))
+        st.session_state.mcq_current_id = pool[st.session_state.mcq_index]["id"]
+    else:
+        st.session_state.mcq_current_id = None
+
+
+def sync_problem_state(pool: list[dict[str, Any]]) -> None:
+    pool_signature = "|".join(item["id"] for item in pool)
+    if pool_signature != st.session_state.problem_pool_signature:
+        current_id = st.session_state.problem_current_id
+        st.session_state.problem_pool_signature = pool_signature
+        if current_id and current_id in {item["id"] for item in pool}:
+            st.session_state.problem_index = [item["id"] for item in pool].index(current_id)
+        else:
+            st.session_state.problem_index = 0
+            st.session_state.problem_show_solution_for = None
+
+    if pool:
+        st.session_state.problem_index = max(0, min(st.session_state.problem_index, len(pool) - 1))
+        st.session_state.problem_current_id = pool[st.session_state.problem_index]["id"]
+    else:
+        st.session_state.problem_current_id = None
+        st.session_state.problem_show_solution_for = None
+
+
+def inventory_rows(bank: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    years = Counter()
+    quizzes = Counter()
+
+    for item in bank:
+        item_type = "MCQ" if item["type"] == "multiple_choice" else "Problem"
+        year = year_label(item)
+        if year:
+            years[(year, item_type)] += 1
+        for tag in item.get("tags", []):
+            if tag.startswith("quiz:test-"):
+                quizzes[(tag.removeprefix("quiz:test-"), item_type)] += 1
+
+    year_rows: list[dict[str, Any]] = []
+    for year in sorted({year for year, _ in years}):
+        year_rows.append(
+            {
+                "Year": year,
+                "MCQ": years.get((year, "MCQ"), 0),
+                "Problems": years.get((year, "Problem"), 0),
+            }
+        )
+
+    quiz_rows: list[dict[str, Any]] = []
+    for test in sorted({test for test, _ in quizzes}, key=lambda value: float(value)):
+        quiz_rows.append(
+            {
+                "Quiz test": test,
+                "Unique MCQ tagged": quizzes.get((test, "MCQ"), 0),
+            }
+        )
+
+    return year_rows, quiz_rows
+
+
+def category_rows(bank: list[dict[str, Any]], progress: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    counters: dict[str, Counter[str]] = {}
+
+    for item in bank:
+        category = primary_category(item)
+        bucket = counters.setdefault(category, Counter())
+        bucket["total"] += 1
+        if item["type"] == "multiple_choice":
+            bucket["mcq"] += 1
+        else:
+            bucket["problems"] += 1
+
+        q_progress = progress_for(progress, item["id"])
+        if item_has_activity(q_progress):
+            bucket["started"] += 1
+        if q_progress["incorrect_count"] > 0:
+            bucket["incorrect"] += 1
+        if q_progress["bookmarked"]:
+            bucket["bookmarked"] += 1
+
+    rows: list[dict[str, Any]] = []
+    for category, bucket in sorted(counters.items(), key=lambda entry: (-entry[1]["total"], entry[0])):
+        rows.append(
+            {
+                "Category": category,
+                "Questions": bucket["total"],
+                "MCQ": bucket["mcq"],
+                "Problems": bucket["problems"],
+                "Started": bucket["started"],
+                "Incorrect MCQ": bucket["incorrect"],
+                "Bookmarked": bucket["bookmarked"],
+            }
+        )
+    return rows
+
+
+def filter_browser_items(bank: list[dict[str, Any]], progress: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    items = list(bank)
+
+    if st.session_state.browser_type == "Multiple choice":
+        items = [item for item in items if item["type"] == "multiple_choice"]
+    elif st.session_state.browser_type == "Problems":
+        items = [item for item in items if item["type"] == "open_response"]
+
+    if st.session_state.browser_sources:
+        selected = set(st.session_state.browser_sources)
+        items = [item for item in items if source_group(item) in selected]
+
+    if st.session_state.browser_years:
+        selected_years = set(st.session_state.browser_years)
+        items = [item for item in items if year_label(item) in selected_years]
+
+    if st.session_state.browser_categories:
+        items = [item for item in items if matches_category_filter(item, st.session_state.browser_categories)]
+
+    query = st.session_state.browser_search.strip().casefold()
+    if query:
+        items = [item for item in items if query in item["question"].casefold()]
+
+    progress_mode = st.session_state.browser_progress
+    if progress_mode == "No activity yet":
+        items = [item for item in items if not item_has_activity(progress_for(progress, item["id"]))]
+    elif progress_mode == "Started":
+        items = [item for item in items if item_has_activity(progress_for(progress, item["id"]))]
+    elif progress_mode == "Incorrect MCQ":
+        items = [item for item in items if progress_for(progress, item["id"])["incorrect_count"] > 0]
+    elif progress_mode == "Bookmarked":
+        items = [item for item in items if progress_for(progress, item["id"])["bookmarked"]]
+    elif progress_mode == "Low confidence problems":
+        items = [
+            item
+            for item in items
+            if item["type"] == "open_response" and (progress_for(progress, item["id"])["confidence_level"] or 99) <= 2
+        ]
+    elif progress_mode == "Unrated problems":
+        items = [item for item in items if item["type"] == "open_response" and progress_for(progress, item["id"])["confidence_level"] is None]
+
+    return sorted(
+        items,
+        key=lambda item: (
+            item["type"],
+            primary_category(item),
+            source_label(item),
+            item["question"],
+        ),
+    )
+
+
+def render_page_heading(kicker: str, title: str, subtitle: str) -> None:
+    st.markdown(
+        (
+            f'<div class="section-kicker">{kicker}</div>'
+            f'<div class="section-title">{title}</div>'
+            f'<div class="section-subtitle">{subtitle}</div>'
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def render_stats(bank: list[dict[str, Any]], progress: dict[str, dict[str, Any]]) -> None:
+    mcq_items = [item for item in bank if item["type"] == "multiple_choice"]
+    problem_items = [item for item in bank if item["type"] == "open_response"]
+    seen_count = sum(1 for item in mcq_items if progress_for(progress, item["id"])["attempts"] > 0)
+    failed_count = sum(1 for item in mcq_items if progress_for(progress, item["id"])["incorrect_count"] > 0)
+    bookmarked_count = sum(1 for row in progress.values() if row["bookmarked"])
+    rated_problems = [progress_for(progress, item["id"])["confidence_level"] for item in problem_items]
+    rated_values = [value for value in rated_problems if value is not None]
+
+    col1, col2, col3, col4, col5 = st.columns(5)
+    col1.metric("MCQ bank", len(mcq_items))
+    col2.metric("Problems", len(problem_items))
+    col3.metric("Seen MCQ", seen_count)
+    col4.metric("Failed MCQ", failed_count)
+    if rated_values:
+        avg_confidence = sum(rated_values) / len(rated_values)
+        col5.metric("Problem confidence", f"{avg_confidence:.1f}/5")
+    else:
+        col5.metric("Problem confidence", "Unrated")
+    st.caption(f"Bookmarked items: {bookmarked_count}")
+
+
+def render_overview(bank: list[dict[str, Any]], progress: dict[str, dict[str, Any]], report: dict[str, Any]) -> None:
+    summary = report.get("summary", {})
+    mcq_items = [item for item in bank if item["type"] == "multiple_choice"]
+    problem_items = [item for item in bank if item["type"] == "open_response"]
+    problem_images = sum(1 for item in problem_items if item.get("image_paths"))
+    problem_solutions = sum(1 for item in problem_items if item.get("solution_text"))
+
+    st.markdown(
+        """
+        <div class="hero">
+            <h1>Exam study workspace</h1>
+            <p>
+                Start here, see the whole bank at a glance, then move into either multiple-choice practice
+                or open-ended problem study. The app keeps your mistakes, bookmarks, and problem confidence locally.
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    render_stats(bank, progress)
+
+    render_page_heading(
+        "Overview",
+        "Bank snapshot",
+        "This page is the starting point. Use it to decide what to study next instead of landing inside a question immediately.",
+    )
+
+    quick1, quick2, quick3 = st.columns(3)
+    with quick1:
+        st.button(
+            "Open multiple choice",
+            width="stretch",
+            on_click=go_to_section,
+            args=("Multiple choice",),
+        )
+    with quick2:
+        st.button("Review failed MCQ", width="stretch", on_click=go_to_failed_mcq)
+    with quick3:
+        st.button("Open problems", width="stretch", on_click=go_to_section, args=("Problems",))
+    st.caption("Use the sidebar for primary navigation. The buttons above are shortcuts.")
+
+    info_left, info_right = st.columns([1.2, 1])
+    with info_left:
+        with st.container(border=True):
+            st.markdown("### What is in the bank")
+            st.write(f"- {len(mcq_items)} unique multiple-choice questions")
+            st.write(f"- {len(problem_items)} open-ended problems")
+            st.write(f"- {problem_images} problems with extracted images")
+            st.write(f"- {problem_solutions} problems with stored solution text")
+            if summary:
+                st.caption(
+                    f"Built from {summary.get('quiz_files', 0)} quiz HTML files and "
+                    f"{summary.get('exam_pdf_files', 0)} exam PDFs. "
+                    f"Current build warnings: {summary.get('warnings', 0)}."
+                )
+    with info_right:
+        with st.container(border=True):
+            st.markdown("### Suggested flow")
+            st.write("1. Use multiple choice for spaced repetition and failed-question loops.")
+            st.write("2. Use problems for slower study with images and reveal-on-demand answers.")
+            st.write("3. Mark bookmarks and confidence so the next session starts where you are weakest.")
+
+    year_rows, quiz_rows = inventory_rows(bank)
+    category_summary = category_rows(bank, progress)
+    inv_left, inv_right = st.columns(2)
+    with inv_left:
+        with st.container(border=True):
+            st.markdown("### Exam inventory")
+            st.caption("Unique bank items grouped by exam year.")
+            st.dataframe(year_rows, width="stretch", hide_index=True)
+    with inv_right:
+        with st.container(border=True):
+            st.markdown("### Quiz inventory")
+            st.caption("Unique MCQ tagged by optional online quiz number.")
+            st.dataframe(quiz_rows, width="stretch", hide_index=True)
+
+    with st.container(border=True):
+        st.markdown("### Category overview")
+        st.caption("Primary topic buckets with a quick progress snapshot.")
+        st.dataframe(category_summary, width="stretch", hide_index=True)
+
+
+def render_browser_page(bank: list[dict[str, Any]], progress: dict[str, dict[str, Any]]) -> None:
+    categories = all_categories(bank)
+    years = all_years(bank)
+
+    st.sidebar.subheader("Question browser")
+    st.sidebar.selectbox("Question type", ["All", "Multiple choice", "Problems"], key="browser_type")
+    st.sidebar.multiselect("Categories", categories, key="browser_categories")
+    st.sidebar.multiselect("Years", years, key="browser_years")
+    st.sidebar.multiselect("Sources", ["Exam", "Quiz"], key="browser_sources")
+    st.sidebar.selectbox(
+        "Progress filter",
+        ["All", "No activity yet", "Started", "Incorrect MCQ", "Bookmarked", "Low confidence problems", "Unrated problems"],
+        key="browser_progress",
+    )
+    st.sidebar.text_input("Search text", key="browser_search", placeholder="Search in question text")
+
+    filtered_items = filter_browser_items(bank, progress)
+
+    render_page_heading(
+        "Question browser",
+        "All questions and progress",
+        "Filter by topic, source, year, or progress status, then preview any item without entering study mode.",
+    )
+
+    started_count = sum(1 for item in filtered_items if item_has_activity(progress_for(progress, item["id"])))
+    incorrect_count = sum(1 for item in filtered_items if progress_for(progress, item["id"])["incorrect_count"] > 0)
+    bookmarked_count = sum(1 for item in filtered_items if progress_for(progress, item["id"])["bookmarked"])
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Filtered questions", len(filtered_items))
+    col2.metric("Started", started_count)
+    col3.metric("Incorrect MCQ", incorrect_count)
+    col4.metric("Bookmarked", bookmarked_count)
+
+    if not filtered_items:
+        st.info("No questions match the current browser filters.")
+        return
+
+    rows = []
+    for item in filtered_items:
+        q_progress = progress_for(progress, item["id"])
+        rows.append(
+            {
+                "Ref": source_label(item),
+                "Type": "MCQ" if item["type"] == "multiple_choice" else "Problem",
+                "Category": primary_category(item),
+                "Year": year_label(item) or "—",
+                "Source": source_group(item),
+                "Prompt": prompt_preview(item["question"]),
+                "Attempts": q_progress["attempts"],
+                "Missed": q_progress["incorrect_count"],
+                "Confidence": confidence_label(q_progress["confidence_level"]) if item["type"] == "open_response" else "—",
+                "Bookmarked": "Yes" if q_progress["bookmarked"] else "",
+            }
+        )
+
+    with st.container(border=True):
+        st.markdown("### Filtered bank")
+        st.dataframe(rows, width="stretch", hide_index=True, height=360)
+
+    item_map = {item["id"]: item for item in filtered_items}
+    item_ids = list(item_map)
+    if st.session_state.browser_current_id not in item_map:
+        st.session_state.browser_current_id = item_ids[0]
+
+    selected_id = st.selectbox(
+        "Preview question",
+        options=item_ids,
+        index=item_ids.index(st.session_state.browser_current_id),
+        format_func=lambda question_id: browser_option_label(item_map[question_id]),
+    )
+    st.session_state.browser_current_id = selected_id
+    item = item_map[selected_id]
+    q_progress = progress_for(progress, item["id"])
+
+    badges = [
+        (source_label(item), "cool"),
+        (primary_category(item), ""),
+    ]
+    if q_progress["bookmarked"]:
+        badges.append(("Bookmarked", "success"))
+    if item["type"] == "multiple_choice" and q_progress["incorrect_count"] > 0:
+        badges.append((f"Missed {q_progress['incorrect_count']}", "warm"))
+    if item["type"] == "open_response" and q_progress["confidence_level"] is not None:
+        badges.append((confidence_label(q_progress["confidence_level"]), "success"))
+    render_badges(badges)
+    st.caption("All categories: " + " | ".join(item_categories(item)))
+
+    preview_left, preview_right = st.columns([1.35, 0.85])
+    with preview_left:
+        with st.container(border=True):
+            st.markdown("### Question")
+            render_preserved_text(item["question"])
+            render_item_images(item)
+    with preview_right:
+        with st.container(border=True):
+            st.markdown("### Progress")
+            st.write(f"- Source: {source_group(item)}")
+            st.write(f"- Year: {year_label(item) or '—'}")
+            st.write(f"- Attempts: {q_progress['attempts']}")
+            st.write(f"- Incorrect: {q_progress['incorrect_count']}")
+            st.write(f"- Bookmarked: {'Yes' if q_progress['bookmarked'] else 'No'}")
+            if item["type"] == "open_response":
+                st.write(f"- Confidence: {confidence_label(q_progress['confidence_level'])}")
+
+            if item["type"] == "multiple_choice":
+                st.button(
+                    "Study this MCQ only",
+                    width="stretch",
+                    on_click=open_mcq_focus,
+                    args=(item["id"],),
+                )
+            else:
+                st.button(
+                    "Open this problem",
+                    width="stretch",
+                    on_click=open_problem_focus,
+                    args=(item["id"],),
+                )
+
+    with st.expander("Show stored answer", expanded=False):
+        if item["type"] == "multiple_choice":
+            st.markdown("**Options**")
+            for letter in [option_letter(i) for i in range(len(item["options"]))]:
+                st.write(choice_label(item, letter))
+            st.markdown("**Correct answer**")
+            for letter in item["answer_letters"]:
+                st.write(choice_label(item, letter))
+        elif item.get("solution_text"):
+            render_preserved_text(item["solution_text"])
+        else:
+            st.info("No stored solution text is available for this problem yet.")
+
+
+def show_mcq_feedback(item: dict[str, Any], feedback: dict[str, Any] | None) -> None:
+    if not feedback or feedback.get("question_id") != item["id"]:
+        return
+
+    if feedback["is_correct"]:
+        st.success("Correct.")
+    else:
+        st.error("Incorrect.")
+
+    correct_labels = [choice_label(item, letter) for letter in item["answer_letters"] if letter in LETTERS]
+    if correct_labels:
+        st.markdown("**Correct answer**")
+        for label in correct_labels:
+            st.write(label)
+
+    if item.get("solution_text"):
+        st.markdown("**Explanation / solution**")
+        render_rich_text(item["solution_text"])
+
+
+def render_mcq_page(bank: list[dict[str, Any]], progress: dict[str, dict[str, Any]], report: dict[str, Any]) -> None:
+    st.sidebar.subheader("Multiple choice")
+    st.sidebar.selectbox("Pool", ["All", "Unseen", "Failed only", "Bookmarked"], key="mcq_mode")
+    st.sidebar.multiselect("Categories", all_categories(bank), key="mcq_categories")
+
+    if st.sidebar.button("Reshuffle MCQ order", width="stretch"):
+        reset_mcq(clear_subset=False)
+        st.rerun()
+
+    if st.sidebar.button(
+        "Repeat missed this session",
+        width="stretch",
+        disabled=not st.session_state.mcq_missed_ids,
+    ):
+        st.session_state.mcq_subset_ids = list(dict.fromkeys(st.session_state.mcq_missed_ids))
+        reset_mcq(clear_subset=False)
+        st.rerun()
+
+    if st.sidebar.button("Reset MCQ session", width="stretch"):
+        reset_mcq(clear_subset=True)
+        st.rerun()
+
+    pool = build_mcq_pool(
+        bank,
+        progress,
+        st.session_state.mcq_mode,
+        st.session_state.mcq_subset_ids,
+        st.session_state.mcq_categories,
+    )
+    sync_mcq_state(pool)
+
+    render_page_heading(
+        "Multiple choice",
+        "Focused practice",
+        "Answer, check, and loop missed questions without leaving the page.",
+    )
+
+    subset_active = st.session_state.mcq_subset_ids is not None
+    status = [f"{len(pool)} questions in current pool", f"Mode: {st.session_state.mcq_mode}"]
+    if subset_active:
+        status.append("Missed-question subset active")
+    if st.session_state.mcq_categories:
+        status.append("Categories: " + ", ".join(st.session_state.mcq_categories))
+    st.caption(" | ".join(status))
+
+    if not pool:
+        st.info("No multiple-choice questions match the current filters.")
+        return
+
+    item = pool[st.session_state.mcq_index]
+    q_progress = progress_for(progress, item["id"])
+
+    badges = [
+        (source_label(item), "cool"),
+        (primary_category(item), ""),
+        (f"Question {st.session_state.mcq_index + 1} / {len(pool)}", ""),
+        (f"Attempts {q_progress['attempts']}", ""),
+    ]
+    if q_progress["incorrect_count"]:
+        badges.append((f"Missed {q_progress['incorrect_count']}", "warm"))
+    if q_progress["bookmarked"]:
+        badges.append(("Bookmarked", "success"))
+    render_badges(badges)
+
+    nav1, nav2, nav3 = st.columns([1, 1, 1])
+    with nav1:
+        if st.button("Previous", disabled=st.session_state.mcq_index == 0, width="stretch"):
+            st.session_state.mcq_index -= 1
+            st.session_state.mcq_feedback = None
+            st.rerun()
+    with nav2:
+        bookmark_label = "Remove bookmark" if q_progress["bookmarked"] else "Bookmark"
+        if st.button(bookmark_label, width="stretch"):
+            set_bookmark(item["id"], not bool(q_progress["bookmarked"]))
+            st.rerun()
+    with nav3:
+        if st.button("Next", disabled=st.session_state.mcq_index >= len(pool) - 1, width="stretch"):
+            st.session_state.mcq_index += 1
+            st.session_state.mcq_feedback = None
+            st.rerun()
+
+    with st.container(border=True):
+        st.markdown("### Question")
+        render_rich_text(item["question"])
+
+    is_multi_answer = len(item["answer_letters"]) > 1
+    with st.container(border=True):
+        st.markdown("### Choose your answer")
+        with st.form(key=f"mcq-form-{item['id']}"):
+            if is_multi_answer:
+                selection = st.multiselect(
+                    "Select all correct answers",
+                    options=[option_letter(i) for i in range(len(item["options"]))],
+                    format_func=lambda letter: choice_label(item, letter),
+                )
+            else:
+                selection = st.radio(
+                    "Select one answer",
+                    options=[option_letter(i) for i in range(len(item["options"]))],
+                    format_func=lambda letter: choice_label(item, letter),
+                    index=None,
+                )
+
+            submitted = st.form_submit_button("Check answer", width="stretch")
+            if submitted:
+                chosen = selection if isinstance(selection, list) else ([selection] if selection else [])
+                if not chosen:
+                    st.warning("Select an answer before submitting.")
+                else:
+                    is_correct = set(chosen) == set(item["answer_letters"])
+                    record_attempt(item["id"], is_correct)
+                    if not is_correct and item["id"] not in st.session_state.mcq_missed_ids:
+                        st.session_state.mcq_missed_ids.append(item["id"])
+                    st.session_state.mcq_feedback = {
+                        "question_id": item["id"],
+                        "is_correct": is_correct,
+                        "selected_letters": chosen,
+                    }
+                    st.rerun()
+
+    show_mcq_feedback(item, st.session_state.mcq_feedback)
+
+
+def render_problem_page(bank: list[dict[str, Any]], progress: dict[str, dict[str, Any]]) -> None:
+    st.sidebar.subheader("Problems")
+    st.sidebar.selectbox(
+        "Problem filter",
+        ["All problems", "No confidence yet", "Low confidence (1-2)", "Bookmarked", "With images", "With stored solution"],
+        key="problem_mode",
+    )
+    st.sidebar.multiselect("Categories", all_categories(bank), key="problem_categories")
+
+    if st.sidebar.button("Reset problem position", width="stretch"):
+        reset_problem()
+        st.rerun()
+
+    pool = build_problem_pool(bank, progress, st.session_state.problem_mode, st.session_state.problem_categories)
+    sync_problem_state(pool)
+
+    render_page_heading(
+        "Problems",
+        "Open-ended study",
+        "Work a problem first, reveal the stored answer only when you want it, then rate your confidence.",
+    )
+    status = [f"{len(pool)} problems in current view", f"Filter: {st.session_state.problem_mode}"]
+    if st.session_state.problem_categories:
+        status.append("Categories: " + ", ".join(st.session_state.problem_categories))
+    st.caption(" | ".join(status))
+
+    if not pool:
+        st.info("No problems match the current filters.")
+        return
+
+    item = pool[st.session_state.problem_index]
+    q_progress = progress_for(progress, item["id"])
+    show_solution = st.session_state.problem_show_solution_for == item["id"]
+
+    badges = [
+        (source_label(item), "cool"),
+        (primary_category(item), ""),
+        (f"Problem {st.session_state.problem_index + 1} / {len(pool)}", ""),
+    ]
+    if item.get("image_paths"):
+        badges.append((f"{len(item['image_paths'])} image(s)", "warm"))
+    if q_progress["bookmarked"]:
+        badges.append(("Bookmarked", "success"))
+    if q_progress["confidence_level"] is not None:
+        badges.append((confidence_label(q_progress["confidence_level"]), "success"))
+    render_badges(badges)
+
+    nav1, nav2, nav3, nav4 = st.columns([1, 1.2, 1, 1])
+    with nav1:
+        if st.button("Previous", disabled=st.session_state.problem_index == 0, width="stretch"):
+            st.session_state.problem_index -= 1
+            st.session_state.problem_show_solution_for = None
+            st.rerun()
+    with nav2:
+        toggle_label = "Hide answer" if show_solution else "Show answer"
+        if st.button(toggle_label, width="stretch"):
+            st.session_state.problem_show_solution_for = None if show_solution else item["id"]
+            st.rerun()
+    with nav3:
+        bookmark_label = "Remove bookmark" if q_progress["bookmarked"] else "Bookmark"
+        if st.button(bookmark_label, width="stretch"):
+            set_bookmark(item["id"], not bool(q_progress["bookmarked"]))
+            st.rerun()
+    with nav4:
+        if st.button("Next", disabled=st.session_state.problem_index >= len(pool) - 1, width="stretch"):
+            st.session_state.problem_index += 1
+            st.session_state.problem_show_solution_for = None
+            st.rerun()
+
+    with st.container(border=True):
+        st.markdown("### Problem statement")
+        render_preserved_text(item["question"])
+        render_item_images(item)
+
+    if show_solution:
+        with st.container(border=True):
+            st.markdown("### Stored answer")
+            if item.get("solution_text"):
+                render_preserved_text(item["solution_text"])
+            else:
+                st.info("No stored solution text is available for this problem yet.")
+
+            st.markdown("### Confidence")
+            st.caption("Rate how confident you felt before looking at the stored answer.")
+            slider_key = f"problem-confidence-{item['id']}"
+            if slider_key not in st.session_state:
+                st.session_state[slider_key] = q_progress["confidence_level"] or 3
+            st.select_slider(
+                "Confidence",
+                options=[1, 2, 3, 4, 5],
+                format_func=confidence_label,
+                key=slider_key,
+            )
+            if st.button("Save confidence", width="stretch"):
+                set_confidence(item["id"], int(st.session_state[slider_key]))
+                st.rerun()
+
+
+def main() -> None:
+    st.set_page_config(page_title="Exam Practice", layout="wide")
+    inject_css()
+    init_db()
+    init_session_state()
+
+    bank = load_bank()
+    report = load_report()
+
+    if not bank:
+        st.error("`question_bank.json` is missing. Run `./.venv/bin/python study_tool/build_bank.py` first.")
+        return
+
+    progress = load_progress()
+
+    st.sidebar.header("Navigation")
+    st.sidebar.caption("Start on the overview, then move into the section you want to drill.")
+    selected_section = st.sidebar.radio(
+        "Section",
+        ["Overview", "Question browser", "Multiple choice", "Problems"],
+        index=["Overview", "Question browser", "Multiple choice", "Problems"].index(st.session_state.nav_section),
+    )
+    if selected_section != st.session_state.nav_section:
+        st.session_state.nav_section = selected_section
+
+    if st.session_state.nav_section == "Overview":
+        render_overview(bank, progress, report)
+    elif st.session_state.nav_section == "Question browser":
+        render_browser_page(bank, progress)
+    elif st.session_state.nav_section == "Multiple choice":
+        render_mcq_page(bank, progress, report)
+    else:
+        render_problem_page(bank, progress)
+
+
+if __name__ == "__main__":
+    main()
