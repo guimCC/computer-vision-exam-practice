@@ -3,3 +3,4 @@
 __pycache__/
 progress.sqlite3
 *.pyc
+.streamlit/secrets.toml

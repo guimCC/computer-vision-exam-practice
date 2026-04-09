@@ -101,6 +101,7 @@ Use the final deployed Streamlit app URL there.
 In Streamlit Community Cloud, open the app settings and add secrets based on:
 
 - `.streamlit/secrets.example.toml`
+- your local `.streamlit/secrets.toml`
 
 Template:
 
@@ -122,6 +123,8 @@ Once enabled:
 - you sign in with the same account on laptop and phone -> same progress
 - teammates sign in with their own accounts -> separate progress
 - if auth is not configured, the app falls back to a local guest mode
+
+Locally, you already have an ignored `.streamlit/secrets.toml` file ready to fill in with your real values.
 
 ## Important note about progress
 
