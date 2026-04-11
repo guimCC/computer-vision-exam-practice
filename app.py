@@ -1,4 +1,5 @@
 from __future__ import annotations
+import hashlib
 import html
 import json
 import random
@@ -280,6 +281,36 @@ def inject_css() -> None:
         .mcq-review-tag.selected {
             border-color: rgba(243, 199, 127, 0.46);
             color: #ffdca7;
+        }
+        .llm-copy-shell {
+            display: flex;
+            justify-content: flex-end;
+            align-items: center;
+            min-height: 2rem;
+        }
+        .llm-copy-button {
+            width: 2rem;
+            height: 2rem;
+            border-radius: 999px;
+            border: 1px solid var(--border);
+            background: rgba(17, 25, 36, 0.92);
+            color: var(--muted);
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 120ms ease;
+            padding: 0;
+        }
+        .llm-copy-button:hover {
+            border-color: var(--accent-strong);
+            color: var(--text);
+            background: rgba(28, 43, 62, 0.95);
+        }
+        .llm-copy-button.copied {
+            border-color: rgba(143, 208, 168, 0.52);
+            color: #bbe7ca;
+            background: rgba(143, 208, 168, 0.12);
         }
         .topic-meta {
             color: var(--muted);
@@ -773,9 +804,59 @@ def llm_copy_text(item: dict[str, Any], answer_state: dict[str, Any] | None = No
 
 
 def render_llm_copy_popover(item: dict[str, Any], answer_state: dict[str, Any] | None = None) -> None:
-    with st.popover("LLM copy", width="stretch"):
-        st.caption("Copy this text into another model. The code block has a built-in copy button.")
-        st.code(llm_copy_text(item, answer_state), language="text", wrap_lines=True)
+    copy_text = llm_copy_text(item, answer_state)
+    button_id = "copy-" + hashlib.sha1(
+        f"{item['id']}::{json.dumps(answer_state, sort_keys=True) if answer_state else 'blank'}".encode("utf-8")
+    ).hexdigest()[:10]
+    svg = (
+        "<svg viewBox='0 0 24 24' width='15' height='15' aria-hidden='true' fill='none' "
+        "stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'>"
+        "<rect x='9' y='9' width='10' height='10' rx='2'></rect>"
+        "<path d='M15 9V7a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2'></path>"
+        "</svg>"
+    )
+    st.html(
+        f"""
+        <div class="llm-copy-shell">
+            <button
+                id="{button_id}"
+                class="llm-copy-button"
+                type="button"
+                title="Copy question and answers as text"
+                aria-label="Copy question and answers as text"
+            >
+                {svg}
+            </button>
+        </div>
+        <script>
+        (() => {{
+            const button = document.getElementById({json.dumps(button_id)});
+            if (!button || button.dataset.bound === "1") return;
+            button.dataset.bound = "1";
+            const payload = {json.dumps(copy_text)};
+            button.addEventListener("click", async () => {{
+                try {{
+                    await navigator.clipboard.writeText(payload);
+                    button.classList.add("copied");
+                    const originalTitle = button.title;
+                    button.title = "Copied";
+                    window.setTimeout(() => {{
+                        button.classList.remove("copied");
+                        button.title = originalTitle;
+                    }}, 1200);
+                }} catch (error) {{
+                    button.title = "Copy failed";
+                    window.setTimeout(() => {{
+                        button.title = "Copy question and answers as text";
+                    }}, 1600);
+                }}
+            }});
+        }})();
+        </script>
+        """,
+        width="content",
+        unsafe_allow_javascript=True,
+    )
 
 
 def progress_for(progress: dict[str, dict[str, Any]], question_id: str) -> dict[str, Any]:
