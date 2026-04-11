@@ -724,6 +724,23 @@ def set_confidence(user_id: str, question_id: str, confidence_level: int) -> Non
         )
 
 
+def clear_mcq_topic_progress(user_id: str, bank: list[dict[str, Any]], category: str) -> None:
+    question_ids = [
+        item["id"]
+        for item in bank
+        if item["type"] == "multiple_choice" and primary_category(item) == category
+    ]
+    if not question_ids:
+        return
+
+    placeholders = ", ".join("?" for _ in question_ids)
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            f"DELETE FROM progress WHERE user_id = ? AND question_id IN ({placeholders})",
+            (user_id, *question_ids),
+        )
+
+
 def render_rich_text(text: str) -> None:
     if not text:
         return
@@ -1182,6 +1199,7 @@ def init_session_state() -> None:
         "browser_search": "",
         "browser_current_id": None,
         "mcq_seed": random.randrange(1_000_000_000),
+        "mcq_reset_confirm_category": None,
         "problem_index": 0,
         "problem_pool_signature": "",
         "problem_current_id": None,
@@ -1238,11 +1256,21 @@ def open_active_mcq_session(category: str | None) -> None:
 def open_mcq_home() -> None:
     st.session_state.nav_section = "Multiple choice"
     st.session_state.mcq_active_category = None
+    st.session_state.mcq_reset_confirm_category = None
+
+
+def arm_mcq_topic_reset(category: str) -> None:
+    st.session_state.mcq_reset_confirm_category = category
+
+
+def cancel_mcq_topic_reset() -> None:
+    st.session_state.mcq_reset_confirm_category = None
 
 
 def start_mcq_topic(category: str, mode: str, question_id: str | None = None) -> None:
     st.session_state.nav_section = "Multiple choice"
     st.session_state.mcq_active_category = category
+    st.session_state.mcq_reset_confirm_category = None
     st.session_state.mcq_session_request = {
         "category": category,
         "mode": mode,
@@ -2075,6 +2103,38 @@ def render_mcq_page(
             ]
         )
     )
+
+    with st.expander("Reset this topic"):
+        st.caption(
+            "This deletes your MCQ progress for this topic only, including attempts, failed-review state, and bookmarks."
+        )
+        st.caption("After reset, the topic will reopen as a fresh unseen session.")
+        if st.session_state.mcq_reset_confirm_category != active_category:
+            st.button(
+                "Arm reset for this topic",
+                key=f"arm-reset-{active_category}",
+                width="stretch",
+                on_click=arm_mcq_topic_reset,
+                args=(active_category,),
+            )
+        else:
+            st.warning(f"Reset is armed for {active_category}. Confirm to wipe your MCQ progress in this topic.")
+            reset_left, reset_right = st.columns(2)
+            if reset_left.button(
+                "Confirm clear topic progress",
+                key=f"confirm-reset-{active_category}",
+                width="stretch",
+            ):
+                clear_mcq_topic_progress(user_id, bank, active_category)
+                clear_mcq_session(user_id)
+                start_mcq_topic(active_category, "Unseen only")
+                st.rerun()
+            reset_right.button(
+                "Cancel",
+                key=f"cancel-reset-{active_category}",
+                width="stretch",
+                on_click=cancel_mcq_topic_reset,
+            )
 
     q_progress = progress_for(progress, item["id"])
     badges = [
