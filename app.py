@@ -1928,7 +1928,10 @@ def render_mcq_home(
                 st.caption(
                     f"Active session · {active_session.get('mode')} · {session_remaining} remaining"
                 )
-                action_left, action_right = st.columns(2)
+                show_failed_action = row["Failed"] > 0 and active_session.get("mode") != "Failed in topic"
+                action_columns = st.columns(3 if show_failed_action else 2)
+                action_left = action_columns[0]
+                action_right = action_columns[1]
                 action_left.button(
                     "Resume session",
                     key=f"mcq-resume-{row['Category']}",
@@ -1943,14 +1946,39 @@ def render_mcq_home(
                     on_click=start_mcq_topic,
                     args=(row["Category"], "Unseen only"),
                 )
+                if show_failed_action:
+                    action_columns[2].button(
+                        "Reattempt failed",
+                        key=f"mcq-failed-{row['Category']}",
+                        width="stretch",
+                        on_click=start_mcq_topic,
+                        args=(row["Category"], "Failed in topic"),
+                    )
             else:
-                st.button(
-                    f"Open topic · {'resume unseen' if row['Unseen'] > 0 else 'review all'}",
-                    key=f"mcq-topic-{row['Category']}",
-                    width="stretch",
-                    on_click=start_mcq_topic,
-                    args=(row["Category"], default_mode),
-                )
+                if row["Failed"] > 0:
+                    open_col, failed_col = st.columns(2)
+                    open_col.button(
+                        f"Open topic · {'resume unseen' if row['Unseen'] > 0 else 'review all'}",
+                        key=f"mcq-topic-{row['Category']}",
+                        width="stretch",
+                        on_click=start_mcq_topic,
+                        args=(row["Category"], default_mode),
+                    )
+                    failed_col.button(
+                        "Reattempt failed",
+                        key=f"mcq-failed-{row['Category']}",
+                        width="stretch",
+                        on_click=start_mcq_topic,
+                        args=(row["Category"], "Failed in topic"),
+                    )
+                else:
+                    st.button(
+                        f"Open topic · {'resume unseen' if row['Unseen'] > 0 else 'review all'}",
+                        key=f"mcq-topic-{row['Category']}",
+                        width="stretch",
+                        on_click=start_mcq_topic,
+                        args=(row["Category"], default_mode),
+                    )
 
             has_resettable_progress = bool(row["Answered"] or row["Failed"] or row["Bookmarked"])
             if has_resettable_progress:
