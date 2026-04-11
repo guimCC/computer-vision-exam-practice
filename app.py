@@ -2108,9 +2108,26 @@ def render_mcq_page(
         else:
             st.info("This session has no questions left. Start a fresh unseen session or review the full topic.")
         empty_left, empty_mid, empty_right = st.columns(3)
-        empty_left.button("Start fresh unseen", width="stretch", on_click=start_mcq_topic, args=(active_category, "Unseen only"))
-        empty_mid.button("Review all in topic", width="stretch", on_click=start_mcq_topic, args=(active_category, "All in topic"))
-        empty_right.button("Back to topics", width="stretch", on_click=open_mcq_home)
+        empty_left.button(
+            "Start fresh unseen",
+            key=f"mcq-empty-fresh-{active_category}",
+            width="stretch",
+            on_click=start_mcq_topic,
+            args=(active_category, "Unseen only"),
+        )
+        empty_mid.button(
+            "Review all in topic",
+            key=f"mcq-empty-review-{active_category}",
+            width="stretch",
+            on_click=start_mcq_topic,
+            args=(active_category, "All in topic"),
+        )
+        empty_right.button(
+            "Back to topics",
+            key=f"mcq-empty-topics-{active_category}",
+            width="stretch",
+            on_click=open_mcq_home,
+        )
         save_user_state(
             user_id,
             last_section="Multiple choice",
@@ -2140,15 +2157,39 @@ def render_mcq_page(
         st.markdown('<div class="sticky-anchor"></div>', unsafe_allow_html=True)
         controls = st.columns([0.95, 1.1, 1, 1, 1])
         with controls[0]:
-            st.button("Topics", width="stretch", on_click=open_mcq_home)
+            st.button("Topics", key=f"mcq-topics-{active_category}", width="stretch", on_click=open_mcq_home)
         with controls[1]:
-            st.button("Start fresh unseen", width="stretch", on_click=start_mcq_topic, args=(active_category, "Unseen only"))
+            st.button(
+                "Start fresh unseen",
+                key=f"mcq-fresh-{active_category}",
+                width="stretch",
+                on_click=start_mcq_topic,
+                args=(active_category, "Unseen only"),
+            )
         with controls[2]:
-            st.button("All in topic", width="stretch", on_click=start_mcq_topic, args=(active_category, "All in topic"))
+            st.button(
+                "All in topic",
+                key=f"mcq-all-{active_category}",
+                width="stretch",
+                on_click=start_mcq_topic,
+                args=(active_category, "All in topic"),
+            )
         with controls[3]:
-            st.button("Failed in topic", width="stretch", on_click=start_mcq_topic, args=(active_category, "Failed in topic"))
+            st.button(
+                "Failed in topic",
+                key=f"mcq-failed-mode-{active_category}",
+                width="stretch",
+                on_click=start_mcq_topic,
+                args=(active_category, "Failed in topic"),
+            )
         with controls[4]:
-            st.button("Bookmarked in topic", width="stretch", on_click=start_mcq_topic, args=(active_category, "Bookmarked in topic"))
+            st.button(
+                "Bookmarked in topic",
+                key=f"mcq-bookmarked-{active_category}",
+                width="stretch",
+                on_click=start_mcq_topic,
+                args=(active_category, "Bookmarked in topic"),
+            )
         st.caption(f"Current session mode: {active_session['mode']}")
 
     if topic_row:
@@ -2247,9 +2288,26 @@ def render_mcq_page(
             st.markdown("### Session complete")
             st.success("You have answered every question in this frozen session.")
             done1, done2, done3 = st.columns(3)
-            done1.button("Start fresh unseen", width="stretch", on_click=start_mcq_topic, args=(active_category, "Unseen only"))
-            done2.button("Review all in topic", width="stretch", on_click=start_mcq_topic, args=(active_category, "All in topic"))
-            done3.button("Back to topics", width="stretch", on_click=open_mcq_home)
+            done1.button(
+                "Start fresh unseen",
+                key=f"mcq-done-fresh-{active_category}",
+                width="stretch",
+                on_click=start_mcq_topic,
+                args=(active_category, "Unseen only"),
+            )
+            done2.button(
+                "Review all in topic",
+                key=f"mcq-done-review-{active_category}",
+                width="stretch",
+                on_click=start_mcq_topic,
+                args=(active_category, "All in topic"),
+            )
+            done3.button(
+                "Back to topics",
+                key=f"mcq-done-topics-{active_category}",
+                width="stretch",
+                on_click=open_mcq_home,
+            )
 
 
 def render_problem_page(
