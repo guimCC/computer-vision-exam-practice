@@ -1858,6 +1858,7 @@ def show_mcq_feedback(item: dict[str, Any], answer_state: dict[str, Any] | None)
 
 
 def render_mcq_home(
+    bank: list[dict[str, Any]],
     topic_rows: list[dict[str, Any]],
     candidate: dict[str, Any] | None,
     active_session: dict[str, Any] | None,
@@ -1884,6 +1885,9 @@ def render_mcq_home(
         "Multiple choice",
         "MCQ home",
         "Pick one topic, see how much is already done, and jump back in without opening the sidebar.",
+    )
+    st.caption(
+        "Reset topic progress is only available from this topics screen. It is intentionally kept out of the active question view because it deletes study state."
     )
 
     if candidate:
@@ -1947,6 +1951,39 @@ def render_mcq_home(
                     on_click=start_mcq_topic,
                     args=(row["Category"], default_mode),
                 )
+
+            has_resettable_progress = bool(row["Answered"] or row["Failed"] or row["Bookmarked"])
+            if has_resettable_progress:
+                if st.session_state.mcq_reset_confirm_category == row["Category"]:
+                    st.warning(
+                        f"Topic reset will permanently delete your MCQ attempts, failed-review state, and bookmarks for {row['Category']}."
+                    )
+                    st.caption("Use this only if you want to restudy this topic from zero.")
+                    reset_left, reset_right = st.columns(2)
+                    if reset_left.button(
+                        "Confirm topic reset",
+                        key=f"confirm-reset-{row['Category']}",
+                        width="stretch",
+                    ):
+                        clear_mcq_topic_progress(user_id, bank, row["Category"])
+                        if active_session and active_session.get("category") == row["Category"]:
+                            clear_mcq_session(user_id)
+                        open_mcq_home()
+                        st.rerun()
+                    reset_right.button(
+                        "Cancel",
+                        key=f"cancel-reset-{row['Category']}",
+                        width="stretch",
+                        on_click=cancel_mcq_topic_reset,
+                    )
+                else:
+                    st.button(
+                        "Reset topic progress",
+                        key=f"arm-reset-{row['Category']}",
+                        width="stretch",
+                        on_click=arm_mcq_topic_reset,
+                        args=(row["Category"],),
+                    )
 
 
 def render_mcq_page(
@@ -2017,7 +2054,7 @@ def render_mcq_page(
         st.rerun()
 
     if st.session_state.mcq_active_category is None:
-        render_mcq_home(topic_rows, candidate, active_session, user_id)
+        render_mcq_home(bank, topic_rows, candidate, active_session, user_id)
         return
 
     if not active_session or active_session.get("category") != st.session_state.mcq_active_category:
@@ -2103,38 +2140,6 @@ def render_mcq_page(
             ]
         )
     )
-
-    with st.expander("Reset this topic"):
-        st.caption(
-            "This deletes your MCQ progress for this topic only, including attempts, failed-review state, and bookmarks."
-        )
-        st.caption("After reset, the topic will reopen as a fresh unseen session.")
-        if st.session_state.mcq_reset_confirm_category != active_category:
-            st.button(
-                "Arm reset for this topic",
-                key=f"arm-reset-{active_category}",
-                width="stretch",
-                on_click=arm_mcq_topic_reset,
-                args=(active_category,),
-            )
-        else:
-            st.warning(f"Reset is armed for {active_category}. Confirm to wipe your MCQ progress in this topic.")
-            reset_left, reset_right = st.columns(2)
-            if reset_left.button(
-                "Confirm clear topic progress",
-                key=f"confirm-reset-{active_category}",
-                width="stretch",
-            ):
-                clear_mcq_topic_progress(user_id, bank, active_category)
-                clear_mcq_session(user_id)
-                start_mcq_topic(active_category, "Unseen only")
-                st.rerun()
-            reset_right.button(
-                "Cancel",
-                key=f"cancel-reset-{active_category}",
-                width="stretch",
-                on_click=cancel_mcq_topic_reset,
-            )
 
     q_progress = progress_for(progress, item["id"])
     badges = [
