@@ -1,4 +1,5 @@
 from __future__ import annotations
+import html
 import json
 import random
 import re
@@ -239,6 +240,46 @@ def inject_css() -> None:
         }
         .resume-callout strong {
             color: var(--text);
+        }
+        .mcq-review-option {
+            padding: 0.78rem 0.9rem;
+            border-radius: 14px;
+            border: 1px solid var(--border);
+            background: rgba(14, 20, 29, 0.88);
+            margin-bottom: 0.58rem;
+        }
+        .mcq-review-option.correct {
+            border-color: rgba(143, 208, 168, 0.52);
+            background: rgba(143, 208, 168, 0.12);
+        }
+        .mcq-review-option.selected {
+            border-color: rgba(243, 199, 127, 0.46);
+            background: rgba(243, 199, 127, 0.10);
+        }
+        .mcq-review-option.correct.selected {
+            border-color: rgba(118, 200, 239, 0.54);
+            background: rgba(118, 200, 239, 0.12);
+        }
+        .mcq-review-tags {
+            margin-top: 0.42rem;
+        }
+        .mcq-review-tag {
+            display: inline-block;
+            margin-right: 0.4rem;
+            padding: 0.16rem 0.48rem;
+            border-radius: 999px;
+            font-size: 0.76rem;
+            font-weight: 700;
+            border: 1px solid var(--border);
+            color: var(--text);
+        }
+        .mcq-review-tag.correct {
+            border-color: rgba(143, 208, 168, 0.52);
+            color: #bbe7ca;
+        }
+        .mcq-review-tag.selected {
+            border-color: rgba(243, 199, 127, 0.46);
+            color: #ffdca7;
         }
         .topic-meta {
             color: var(--muted);
@@ -1621,16 +1662,28 @@ def show_mcq_feedback(item: dict[str, Any], answer_state: dict[str, Any] | None)
         st.error("Incorrect.")
 
     selected_letters = [letter for letter in answer_state.get("selected_letters", []) if letter in LETTERS]
-    if selected_letters:
-        st.markdown("**Your answer**")
-        for label in [choice_label(item, letter) for letter in selected_letters]:
-            st.write(label)
-
-    correct_labels = [choice_label(item, letter) for letter in item["answer_letters"] if letter in LETTERS]
-    if correct_labels:
-        st.markdown("**Correct answer**")
-        for label in correct_labels:
-            st.write(label)
+    st.markdown("**All options**")
+    for letter in [option_letter(i) for i in range(len(item["options"]))]:
+        if letter not in LETTERS:
+            continue
+        labels: list[str] = []
+        classes: list[str] = []
+        if letter in item["answer_letters"]:
+            labels.append('<span class="mcq-review-tag correct">Correct</span>')
+            classes.append("correct")
+        if letter in selected_letters:
+            labels.append('<span class="mcq-review-tag selected">Your answer</span>')
+            classes.append("selected")
+        class_attr = " ".join(["mcq-review-option", *classes])
+        st.markdown(
+            (
+                f'<div class="{class_attr}">'
+                f"<strong>{letter})</strong> {html.escape(item['options'][LETTERS.index(letter)])}"
+                f'<div class="mcq-review-tags">{"".join(labels)}</div>'
+                "</div>"
+            ),
+            unsafe_allow_html=True,
+        )
 
     if item.get("solution_text"):
         st.markdown("**Explanation / solution**")
