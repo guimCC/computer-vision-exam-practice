@@ -361,6 +361,23 @@ def ensure_user_state_table(conn: sqlite3.Connection) -> None:
     )
 
 
+def ensure_mcq_session_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS mcq_session (
+            user_id TEXT PRIMARY KEY,
+            category TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            queue_json TEXT NOT NULL,
+            current_index INTEGER NOT NULL DEFAULT 0,
+            answers_json TEXT NOT NULL DEFAULT '{}',
+            started_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+
 def init_db(default_user_id: str = LOCAL_USER_ID) -> None:
     with sqlite3.connect(DB_PATH) as conn:
         table_exists = conn.execute(
@@ -422,6 +439,7 @@ def init_db(default_user_id: str = LOCAL_USER_ID) -> None:
         if "confidence_updated_at" not in columns:
             conn.execute("ALTER TABLE progress ADD COLUMN confidence_updated_at TEXT")
         ensure_user_state_table(conn)
+        ensure_mcq_session_table(conn)
 
 
 def load_bank() -> list[dict[str, Any]]:
@@ -448,6 +466,92 @@ def load_user_state(user_id: str) -> dict[str, Any]:
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT * FROM user_state WHERE user_id = ?", (user_id,)).fetchone()
     return dict(row) if row else {}
+
+
+def load_mcq_session(user_id: str) -> dict[str, Any] | None:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM mcq_session WHERE user_id = ?", (user_id,)).fetchone()
+
+    if not row:
+        return None
+
+    session = dict(row)
+    try:
+        session["queue_ids"] = json.loads(session.pop("queue_json") or "[]")
+    except json.JSONDecodeError:
+        session["queue_ids"] = []
+    try:
+        session["answers"] = json.loads(session.pop("answers_json") or "{}")
+    except json.JSONDecodeError:
+        session["answers"] = {}
+    session["current_index"] = max(0, int(session.get("current_index", 0) or 0))
+    return session
+
+
+def save_mcq_session(
+    user_id: str,
+    category: str,
+    mode: str,
+    queue_ids: list[str],
+    current_index: int,
+    answers: dict[str, Any],
+    *,
+    started_at: str | None = None,
+) -> dict[str, Any]:
+    now = utc_now()
+    started_at = started_at or now
+    current_index = max(0, min(current_index, max(len(queue_ids) - 1, 0))) if queue_ids else 0
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            INSERT INTO mcq_session (
+                user_id,
+                category,
+                mode,
+                queue_json,
+                current_index,
+                answers_json,
+                started_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                category = excluded.category,
+                mode = excluded.mode,
+                queue_json = excluded.queue_json,
+                current_index = excluded.current_index,
+                answers_json = excluded.answers_json,
+                started_at = excluded.started_at,
+                updated_at = excluded.updated_at
+            """,
+            (
+                user_id,
+                category,
+                mode,
+                json.dumps(queue_ids, ensure_ascii=False),
+                current_index,
+                json.dumps(answers, ensure_ascii=False),
+                started_at,
+                now,
+            ),
+        )
+
+    return {
+        "user_id": user_id,
+        "category": category,
+        "mode": mode,
+        "queue_ids": queue_ids,
+        "current_index": current_index,
+        "answers": answers,
+        "started_at": started_at,
+        "updated_at": now,
+    }
+
+
+def clear_mcq_session(user_id: str) -> None:
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("DELETE FROM mcq_session WHERE user_id = ?", (user_id,))
 
 
 def save_user_state(user_id: str, **updates: Any) -> None:
@@ -600,6 +704,130 @@ def progress_for(progress: dict[str, dict[str, Any]], question_id: str) -> dict[
     )
 
 
+def mcq_bank_map(bank: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {item["id"]: item for item in bank if item["type"] == "multiple_choice"}
+
+
+def normalize_mcq_session(
+    session: dict[str, Any] | None,
+    bank_map: dict[str, dict[str, Any]],
+) -> tuple[dict[str, Any] | None, bool]:
+    if not session:
+        return None, False
+
+    queue_ids = [question_id for question_id in session.get("queue_ids", []) if question_id in bank_map]
+    answers = {
+        question_id: answer
+        for question_id, answer in session.get("answers", {}).items()
+        if question_id in queue_ids
+    }
+    current_index = session.get("current_index", 0)
+    if queue_ids:
+        current_index = max(0, min(int(current_index or 0), len(queue_ids) - 1))
+    else:
+        current_index = 0
+
+    normalized = {
+        **session,
+        "queue_ids": queue_ids,
+        "answers": answers,
+        "current_index": current_index,
+    }
+    changed = (
+        queue_ids != session.get("queue_ids", [])
+        or answers != session.get("answers", {})
+        or current_index != session.get("current_index", 0)
+    )
+    return normalized, changed
+
+
+def mcq_session_answer(session: dict[str, Any] | None, question_id: str) -> dict[str, Any] | None:
+    if not session:
+        return None
+    answer = session.get("answers", {}).get(question_id)
+    return answer if isinstance(answer, dict) else None
+
+
+def mcq_session_remaining(session: dict[str, Any] | None) -> int:
+    if not session:
+        return 0
+    answered = {question_id for question_id in session.get("answers", {}) if question_id in set(session.get("queue_ids", []))}
+    return sum(1 for question_id in session.get("queue_ids", []) if question_id not in answered)
+
+
+def mcq_session_complete(session: dict[str, Any] | None) -> bool:
+    return bool(session and session.get("queue_ids")) and mcq_session_remaining(session) == 0
+
+
+def build_mcq_session_queue(
+    items: list[dict[str, Any]],
+    progress: dict[str, dict[str, Any]],
+    category: str,
+    mode: str,
+) -> list[str]:
+    pool = build_mcq_pool(items, progress, mode, category)
+    return [item["id"] for item in pool]
+
+
+def create_mcq_session(
+    user_id: str,
+    bank: list[dict[str, Any]],
+    progress: dict[str, dict[str, Any]],
+    category: str,
+    mode: str,
+    *,
+    question_id: str | None = None,
+) -> dict[str, Any]:
+    queue_ids = build_mcq_session_queue(bank, progress, category, mode)
+    current_index = 0
+    if question_id and question_id in queue_ids:
+        current_index = queue_ids.index(question_id)
+    return save_mcq_session(
+        user_id,
+        category,
+        mode,
+        queue_ids,
+        current_index,
+        {},
+    )
+
+
+def persist_mcq_answer(
+    user_id: str,
+    session: dict[str, Any],
+    question_id: str,
+    selected_letters: list[str],
+    is_correct: bool,
+) -> dict[str, Any]:
+    answers = dict(session.get("answers", {}))
+    answers[question_id] = {
+        "selected_letters": selected_letters,
+        "is_correct": is_correct,
+        "answered_at": utc_now(),
+    }
+    return save_mcq_session(
+        user_id,
+        session["category"],
+        session["mode"],
+        list(session.get("queue_ids", [])),
+        int(session.get("current_index", 0)),
+        answers,
+        started_at=session.get("started_at"),
+    )
+
+
+def persist_mcq_index(user_id: str, session: dict[str, Any], current_index: int) -> dict[str, Any]:
+    return save_mcq_session(
+        user_id,
+        session["category"],
+        session["mode"],
+        list(session.get("queue_ids", [])),
+        current_index,
+        dict(session.get("answers", {})),
+        started_at=session.get("started_at"),
+    )
+
+
 def option_letter(index: int) -> str:
     return LETTERS[index]
 
@@ -707,7 +935,6 @@ def build_mcq_pool(
     items: list[dict[str, Any]],
     progress: dict[str, dict[str, Any]],
     mode: str,
-    session_subset_ids: list[str] | None,
     selected_category: str | None,
 ) -> list[dict[str, Any]]:
     pool = [item for item in items if item["type"] == "multiple_choice"]
@@ -720,10 +947,6 @@ def build_mcq_pool(
         pool = [item for item in pool if progress_for(progress, item["id"])["incorrect_count"] > 0]
     elif mode == "Bookmarked in topic":
         pool = [item for item in pool if progress_for(progress, item["id"])["bookmarked"]]
-
-    if session_subset_ids is not None:
-        subset = set(session_subset_ids)
-        pool = [item for item in pool if item["id"] in subset]
 
     rng = random.Random(st.session_state.mcq_seed)
     pool = list(pool)
@@ -764,9 +987,10 @@ def build_problem_pool(
 def init_session_state() -> None:
     defaults = {
         "nav_section": "Overview",
-        "mcq_mode": "Unseen only",
         "mcq_active_category": None,
         "mcq_sidebar_topic": "MCQ Home",
+        "mcq_session_request": None,
+        "bootstrapped_navigation": False,
         "problem_mode": "All problems",
         "problem_categories": [],
         "browser_preset": "Custom",
@@ -778,12 +1002,6 @@ def init_session_state() -> None:
         "browser_search": "",
         "browser_current_id": None,
         "mcq_seed": random.randrange(1_000_000_000),
-        "mcq_index": 0,
-        "mcq_pool_signature": "",
-        "mcq_current_id": None,
-        "mcq_subset_ids": None,
-        "mcq_missed_ids": [],
-        "mcq_feedback": None,
         "problem_index": 0,
         "problem_pool_signature": "",
         "problem_current_id": None,
@@ -794,12 +1012,9 @@ def init_session_state() -> None:
 
 
 def reset_mcq(clear_subset: bool) -> None:
-    st.session_state.mcq_index = 0
     st.session_state.mcq_seed = random.randrange(1_000_000_000)
-    st.session_state.mcq_feedback = None
     if clear_subset:
-        st.session_state.mcq_subset_ids = None
-        st.session_state.mcq_missed_ids = []
+        st.session_state.mcq_session_request = None
 
 
 def reset_problem() -> None:
@@ -813,20 +1028,18 @@ def go_to_section(section: str) -> None:
 
 def go_to_failed_mcq() -> None:
     st.session_state.nav_section = "Multiple choice"
-    st.session_state.mcq_mode = "Failed in topic"
-    reset_mcq(clear_subset=False)
 
 
 def open_mcq_focus(question_id: str, category: str) -> None:
     st.session_state.nav_section = "Multiple choice"
     st.session_state.mcq_active_category = category
     st.session_state.mcq_sidebar_topic = category
-    st.session_state.mcq_mode = "All in topic"
-    st.session_state.mcq_subset_ids = [question_id]
-    st.session_state.mcq_feedback = None
+    st.session_state.mcq_session_request = {
+        "category": category,
+        "mode": "All in topic",
+        "question_id": question_id,
+    }
     st.session_state.mcq_seed = random.randrange(1_000_000_000)
-    st.session_state.mcq_current_id = question_id
-    st.session_state.mcq_index = 0
 
 
 def open_problem_focus(question_id: str) -> None:
@@ -838,41 +1051,28 @@ def open_problem_focus(question_id: str) -> None:
     st.session_state.problem_show_solution_for = None
 
 
+def open_active_mcq_session(category: str | None) -> None:
+    st.session_state.nav_section = "Multiple choice"
+    st.session_state.mcq_active_category = category
+    st.session_state.mcq_sidebar_topic = category or "MCQ Home"
+
+
 def open_mcq_home() -> None:
     st.session_state.nav_section = "Multiple choice"
     st.session_state.mcq_active_category = None
     st.session_state.mcq_sidebar_topic = "MCQ Home"
-    st.session_state.mcq_subset_ids = None
-    st.session_state.mcq_feedback = None
 
 
 def start_mcq_topic(category: str, mode: str, question_id: str | None = None) -> None:
     st.session_state.nav_section = "Multiple choice"
     st.session_state.mcq_active_category = category
     st.session_state.mcq_sidebar_topic = category
-    st.session_state.mcq_mode = mode
-    st.session_state.mcq_subset_ids = None
-    st.session_state.mcq_feedback = None
-    st.session_state.mcq_current_id = question_id
-    st.session_state.mcq_index = 0
+    st.session_state.mcq_session_request = {
+        "category": category,
+        "mode": mode,
+        "question_id": question_id,
+    }
     st.session_state.mcq_seed = random.randrange(1_000_000_000)
-
-
-def sync_mcq_state(pool: list[dict[str, Any]]) -> None:
-    pool_signature = "|".join(item["id"] for item in pool)
-    if pool_signature != st.session_state.mcq_pool_signature:
-        current_id = st.session_state.mcq_current_id
-        st.session_state.mcq_pool_signature = pool_signature
-        if current_id and current_id in {item["id"] for item in pool}:
-            st.session_state.mcq_index = [item["id"] for item in pool].index(current_id)
-        else:
-            st.session_state.mcq_index = 0
-
-    if pool:
-        st.session_state.mcq_index = max(0, min(st.session_state.mcq_index, len(pool) - 1))
-        st.session_state.mcq_current_id = pool[st.session_state.mcq_index]["id"]
-    else:
-        st.session_state.mcq_current_id = None
 
 
 def sync_problem_state(pool: list[dict[str, Any]]) -> None:
@@ -1007,20 +1207,21 @@ def topic_stats(topic_rows: list[dict[str, Any]], category: str | None) -> dict[
     return next((row for row in topic_rows if row["Category"] == category), None)
 
 
-def resume_candidate(user_state: dict[str, Any], topic_rows: list[dict[str, Any]]) -> dict[str, Any] | None:
-    if user_state.get("last_section") != "Multiple choice":
+def resume_candidate(active_session: dict[str, Any] | None, topic_rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not active_session:
         return None
-    category = user_state.get("last_mcq_category")
+    category = active_session.get("category")
     row = topic_stats(topic_rows, category)
     if not row:
         return None
-    mode = "Unseen only" if row["Unseen"] > 0 else "All in topic"
     return {
         "category": category,
         "unseen": row["Unseen"],
         "answered": row["Answered"],
-        "mode": mode,
-        "question_id": user_state.get("last_mcq_question_id"),
+        "mode": active_session.get("mode"),
+        "question_id": active_session.get("queue_ids", [None])[active_session.get("current_index", 0)] if active_session.get("queue_ids") else None,
+        "session_remaining": mcq_session_remaining(active_session),
+        "session_total": len(active_session.get("queue_ids", [])),
     }
 
 
@@ -1028,7 +1229,7 @@ def filter_browser_items(
     bank: list[dict[str, Any]],
     progress: dict[str, dict[str, Any]],
     current_mcq_category: str | None,
-    user_state: dict[str, Any],
+    active_mcq_session: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
     items = list(bank)
     preset = st.session_state.browser_preset
@@ -1046,19 +1247,10 @@ def filter_browser_items(
             key=lambda item: (primary_category(item), source_label(item), item["question"]),
         )
 
-    if preset == "Resume last topic" and user_state.get("last_mcq_category"):
-        resume_category = user_state["last_mcq_category"]
-        items = [
-            item
-            for item in items
-            if item["type"] == "multiple_choice" and primary_category(item) == resume_category
-        ]
-        if (user_state.get("last_mcq_mode") or "").startswith("Unseen"):
-            items = [item for item in items if progress_for(progress, item["id"])["attempts"] == 0]
-        return sorted(
-            items,
-            key=lambda item: (primary_category(item), source_label(item), item["question"]),
-        )
+    if preset == "Resume current MCQ session" and active_mcq_session:
+        bank_map = mcq_bank_map(bank)
+        ordered_items = [bank_map[question_id] for question_id in active_mcq_session.get("queue_ids", []) if question_id in bank_map]
+        return ordered_items
 
     if st.session_state.browser_type == "Multiple choice":
         items = [item for item in items if item["type"] == "multiple_choice"]
@@ -1147,7 +1339,7 @@ def render_overview(
     progress: dict[str, dict[str, Any]],
     report: dict[str, Any],
     user_context: dict[str, Any],
-    user_state: dict[str, Any],
+    active_mcq_session: dict[str, Any] | None,
 ) -> None:
     summary = report.get("summary", {})
     mcq_items = [item for item in bank if item["type"] == "multiple_choice"]
@@ -1155,7 +1347,8 @@ def render_overview(
     problem_images = sum(1 for item in problem_items if item.get("image_paths"))
     problem_solutions = sum(1 for item in problem_items if item.get("solution_text"))
     topic_rows = mcq_topic_rows(bank, progress)
-    candidate = resume_candidate(user_state, topic_rows)
+    candidate = resume_candidate(active_mcq_session, topic_rows)
+    save_user_state(user_context["user_id"], last_section="Overview")
 
     st.markdown(
         """
@@ -1180,16 +1373,16 @@ def render_overview(
         st.markdown(
             (
                 '<div class="resume-callout"><strong>Resume ready.</strong> '
-                f"{candidate['category']} still has {candidate['unseen']} unseen questions."
+                f"{candidate['category']} session has {candidate['session_remaining']} question(s) left to answer."
                 "</div>"
             ),
             unsafe_allow_html=True,
         )
         st.button(
-            f"Resume {candidate['category']} · {candidate['unseen']} unseen remaining",
+            f"Resume {candidate['category']} · {candidate['session_remaining']} remaining",
             width="stretch",
-            on_click=start_mcq_topic,
-            args=(candidate["category"], candidate["mode"], candidate.get("question_id")),
+            on_click=open_active_mcq_session,
+            args=(candidate["category"],),
         )
 
     render_page_heading(
@@ -1210,8 +1403,8 @@ def render_overview(
             st.button(
                 "Resume last MCQ topic",
                 width="stretch",
-                on_click=start_mcq_topic,
-                args=(candidate["category"], candidate["mode"], candidate.get("question_id")),
+                on_click=open_active_mcq_session,
+                args=(candidate["category"],),
             )
         else:
             st.button("Open question browser", width="stretch", on_click=go_to_section, args=("Question browser",))
@@ -1275,13 +1468,14 @@ def render_browser_page(
     bank: list[dict[str, Any]],
     progress: dict[str, dict[str, Any]],
     user_context: dict[str, Any],
-    user_state: dict[str, Any],
+    active_mcq_session: dict[str, Any] | None,
 ) -> None:
     categories = all_categories(bank)
     years = all_years(bank)
+    save_user_state(user_context["user_id"], last_section="Question browser")
 
     st.sidebar.subheader("Question browser")
-    st.sidebar.selectbox("Quick preset", ["Custom", "Unseen in current topic", "Resume last topic"], key="browser_preset")
+    st.sidebar.selectbox("Quick preset", ["Custom", "Unseen in current topic", "Resume current MCQ session"], key="browser_preset")
     st.sidebar.selectbox("Question type", ["All", "Multiple choice", "Problems"], key="browser_type")
     st.sidebar.multiselect("Categories", categories, key="browser_categories")
     st.sidebar.multiselect("Years", years, key="browser_years")
@@ -1293,7 +1487,8 @@ def render_browser_page(
     )
     st.sidebar.text_input("Search text", key="browser_search", placeholder="Search in question text")
 
-    filtered_items = filter_browser_items(bank, progress, st.session_state.mcq_active_category, user_state)
+    current_topic = st.session_state.mcq_active_category or (active_mcq_session.get("category") if active_mcq_session else None)
+    filtered_items = filter_browser_items(bank, progress, current_topic, active_mcq_session)
 
     render_page_heading(
         "Question browser",
@@ -1416,14 +1611,20 @@ def render_browser_page(
             st.info("No stored solution text is available for this problem yet.")
 
 
-def show_mcq_feedback(item: dict[str, Any], feedback: dict[str, Any] | None) -> None:
-    if not feedback or feedback.get("question_id") != item["id"]:
+def show_mcq_feedback(item: dict[str, Any], answer_state: dict[str, Any] | None) -> None:
+    if not answer_state:
         return
 
-    if feedback["is_correct"]:
+    if answer_state["is_correct"]:
         st.success("Correct.")
     else:
         st.error("Incorrect.")
+
+    selected_letters = [letter for letter in answer_state.get("selected_letters", []) if letter in LETTERS]
+    if selected_letters:
+        st.markdown("**Your answer**")
+        for label in [choice_label(item, letter) for letter in selected_letters]:
+            st.write(label)
 
     correct_labels = [choice_label(item, letter) for letter in item["answer_letters"] if letter in LETTERS]
     if correct_labels:
@@ -1436,7 +1637,29 @@ def show_mcq_feedback(item: dict[str, Any], feedback: dict[str, Any] | None) -> 
         render_rich_text(item["solution_text"])
 
 
-def render_mcq_home(topic_rows: list[dict[str, Any]], candidate: dict[str, Any] | None) -> None:
+def render_mcq_home(
+    topic_rows: list[dict[str, Any]],
+    candidate: dict[str, Any] | None,
+    active_session: dict[str, Any] | None,
+    user_id: str,
+) -> None:
+    if active_session:
+        save_user_state(
+            user_id,
+            last_section="Multiple choice",
+            last_mcq_category=None,
+            last_mcq_mode=active_session.get("mode"),
+            last_mcq_question_id=None,
+        )
+    else:
+        save_user_state(
+            user_id,
+            last_section="Multiple choice",
+            last_mcq_category=None,
+            last_mcq_mode=None,
+            last_mcq_question_id=None,
+        )
+
     render_page_heading(
         "Multiple choice",
         "MCQ home",
@@ -1447,15 +1670,15 @@ def render_mcq_home(topic_rows: list[dict[str, Any]], candidate: dict[str, Any] 
         st.markdown(
             (
                 '<div class="resume-callout"><strong>Resume last topic.</strong> '
-                f"{candidate['category']} has {candidate['unseen']} unseen questions left.</div>"
+                f"{candidate['category']} session has {candidate['session_remaining']} question(s) left to answer.</div>"
             ),
             unsafe_allow_html=True,
         )
         st.button(
-            f"Resume {candidate['category']} · {candidate['unseen']} unseen remaining",
+            f"Resume {candidate['category']} · {candidate['session_remaining']} remaining",
             width="stretch",
-            on_click=start_mcq_topic,
-            args=(candidate["category"], candidate["mode"], candidate.get("question_id")),
+            on_click=open_active_mcq_session,
+            args=(candidate["category"],),
         )
 
     for row in topic_rows:
@@ -1476,13 +1699,34 @@ def render_mcq_home(topic_rows: list[dict[str, Any]], candidate: dict[str, Any] 
             meta_left, meta_right = st.columns(2)
             meta_left.caption(f"{row['Total']} total")
             meta_right.caption(f"{completion_pct}% complete")
-            st.button(
-                f"Open topic · {'resume unseen' if row['Unseen'] > 0 else 'review all'}",
-                key=f"mcq-topic-{row['Category']}",
-                width="stretch",
-                on_click=start_mcq_topic,
-                args=(row["Category"], default_mode),
-            )
+            if active_session and active_session.get("category") == row["Category"]:
+                session_remaining = mcq_session_remaining(active_session)
+                st.caption(
+                    f"Active session · {active_session.get('mode')} · {session_remaining} remaining"
+                )
+                action_left, action_right = st.columns(2)
+                action_left.button(
+                    "Resume session",
+                    key=f"mcq-resume-{row['Category']}",
+                    width="stretch",
+                    on_click=open_active_mcq_session,
+                    args=(row["Category"],),
+                )
+                action_right.button(
+                    "Start fresh unseen",
+                    key=f"mcq-fresh-{row['Category']}",
+                    width="stretch",
+                    on_click=start_mcq_topic,
+                    args=(row["Category"], "Unseen only"),
+                )
+            else:
+                st.button(
+                    f"Open topic · {'resume unseen' if row['Unseen'] > 0 else 'review all'}",
+                    key=f"mcq-topic-{row['Category']}",
+                    width="stretch",
+                    on_click=start_mcq_topic,
+                    args=(row["Category"], default_mode),
+                )
 
 
 def render_mcq_page(
@@ -1492,19 +1736,47 @@ def render_mcq_page(
     user_id: str,
     user_state: dict[str, Any],
 ) -> None:
+    del report
+    bank_map = mcq_bank_map(bank)
     topic_rows = mcq_topic_rows(bank, progress)
-    candidate = resume_candidate(user_state, topic_rows)
     categories = [row["Category"] for row in topic_rows]
+
+    active_session, session_dirty = normalize_mcq_session(load_mcq_session(user_id), bank_map)
+    if active_session and not active_session.get("queue_ids"):
+        clear_mcq_session(user_id)
+        active_session = None
+    elif active_session and session_dirty:
+        active_session = save_mcq_session(
+            user_id,
+            active_session["category"],
+            active_session["mode"],
+            active_session["queue_ids"],
+            active_session["current_index"],
+            active_session["answers"],
+            started_at=active_session.get("started_at"),
+        )
+
+    pending_request = st.session_state.get("mcq_session_request")
+    if pending_request:
+        active_session = create_mcq_session(
+            user_id,
+            bank,
+            progress,
+            pending_request["category"],
+            pending_request["mode"],
+            question_id=pending_request.get("question_id"),
+        )
+        st.session_state.mcq_session_request = None
+        st.session_state.mcq_active_category = active_session["category"]
+        st.session_state.mcq_sidebar_topic = active_session["category"]
+
+    candidate = resume_candidate(active_session, topic_rows)
     expected_sidebar_topic = st.session_state.mcq_active_category or "MCQ Home"
     if st.session_state.get("mcq_sidebar_topic") != expected_sidebar_topic:
         st.session_state.mcq_sidebar_topic = expected_sidebar_topic
 
     st.sidebar.subheader("Multiple choice")
-    st.sidebar.selectbox(
-        "Jump to topic",
-        ["MCQ Home", *categories],
-        key="mcq_sidebar_topic",
-    )
+    st.sidebar.selectbox("Jump to topic", ["MCQ Home", *categories], key="mcq_sidebar_topic")
     chosen_topic = st.session_state.mcq_sidebar_topic
     if chosen_topic == "MCQ Home" and st.session_state.mcq_active_category is not None:
         open_mcq_home()
@@ -1517,67 +1789,80 @@ def render_mcq_page(
         start_mcq_topic(chosen_topic, default_mode)
         st.rerun()
 
-    if st.sidebar.button("Reshuffle topic order", width="stretch"):
-        reset_mcq(clear_subset=False)
-        st.rerun()
+    if st.sidebar.button("Start fresh current topic", width="stretch", disabled=st.session_state.mcq_active_category is None):
+        active_category = st.session_state.mcq_active_category
+        if active_category is not None:
+            start_mcq_topic(active_category, active_session["mode"] if active_session else "Unseen only")
+            st.rerun()
 
-    if st.sidebar.button(
-        "Repeat missed this session",
-        width="stretch",
-        disabled=not st.session_state.mcq_missed_ids,
-    ):
-        st.session_state.mcq_subset_ids = list(dict.fromkeys(st.session_state.mcq_missed_ids))
-        reset_mcq(clear_subset=False)
-        st.rerun()
-
-    if st.sidebar.button("Reset MCQ topic", width="stretch"):
-        reset_mcq(clear_subset=True)
+    if st.sidebar.button("Clear active MCQ session", width="stretch", disabled=active_session is None):
+        clear_mcq_session(user_id)
+        open_mcq_home()
         st.rerun()
 
     if st.session_state.mcq_active_category is None:
-        save_user_state(user_id, last_section="Multiple choice")
-        render_mcq_home(topic_rows, candidate)
+        render_mcq_home(topic_rows, candidate, active_session, user_id)
         return
 
-    active_category = st.session_state.mcq_active_category
-    pool = build_mcq_pool(
-        bank,
-        progress,
-        st.session_state.mcq_mode,
-        st.session_state.mcq_subset_ids,
-        active_category,
-    )
-    sync_mcq_state(pool)
-    item = pool[st.session_state.mcq_index] if pool else None
+    if not active_session or active_session.get("category") != st.session_state.mcq_active_category:
+        start_mcq_topic(st.session_state.mcq_active_category, "Unseen only")
+        st.rerun()
+
+    active_category = active_session["category"]
+    queue_ids = active_session.get("queue_ids", [])
+    current_index = int(active_session.get("current_index", 0))
+    topic_row = topic_stats(topic_rows, active_category)
+
+    if not queue_ids:
+        render_page_heading(
+            "Multiple choice",
+            active_category,
+            "There is no active queue in this topic right now.",
+        )
+        st.info("This session has no questions left. Start a fresh unseen session or review the full topic.")
+        empty_left, empty_mid, empty_right = st.columns(3)
+        empty_left.button("Start fresh unseen", width="stretch", on_click=start_mcq_topic, args=(active_category, "Unseen only"))
+        empty_mid.button("Review all in topic", width="stretch", on_click=start_mcq_topic, args=(active_category, "All in topic"))
+        empty_right.button("Back to topics", width="stretch", on_click=open_mcq_home)
+        save_user_state(
+            user_id,
+            last_section="Multiple choice",
+            last_mcq_category=active_category,
+            last_mcq_mode=active_session["mode"],
+            last_mcq_question_id=None,
+        )
+        return
+
+    item = bank_map[queue_ids[current_index]]
+    answer_state = mcq_session_answer(active_session, item["id"])
     save_user_state(
         user_id,
         last_section="Multiple choice",
         last_mcq_category=active_category,
-        last_mcq_mode=st.session_state.mcq_mode,
-        last_mcq_question_id=item["id"] if item else None,
+        last_mcq_mode=active_session["mode"],
+        last_mcq_question_id=item["id"],
     )
 
-    topic_row = topic_stats(topic_rows, active_category)
     render_page_heading(
         "Multiple choice",
         active_category,
-        "Topic-focused MCQ practice with fast resume modes for mobile sessions.",
+        "Topic-focused MCQ practice with a frozen session queue that survives reloads and weak connections.",
     )
 
     with st.container(border=True):
         st.markdown('<div class="sticky-anchor"></div>', unsafe_allow_html=True)
-        controls = st.columns([0.95, 1, 1, 1, 1])
+        controls = st.columns([0.95, 1.1, 1, 1, 1])
         with controls[0]:
             st.button("Topics", width="stretch", on_click=open_mcq_home)
         with controls[1]:
-            st.button("Unseen only", width="stretch", on_click=start_mcq_topic, args=(active_category, "Unseen only", st.session_state.mcq_current_id))
+            st.button("Start fresh unseen", width="stretch", on_click=start_mcq_topic, args=(active_category, "Unseen only"))
         with controls[2]:
-            st.button("All in topic", width="stretch", on_click=start_mcq_topic, args=(active_category, "All in topic", st.session_state.mcq_current_id))
+            st.button("All in topic", width="stretch", on_click=start_mcq_topic, args=(active_category, "All in topic"))
         with controls[3]:
-            st.button("Failed in topic", width="stretch", on_click=start_mcq_topic, args=(active_category, "Failed in topic", st.session_state.mcq_current_id))
+            st.button("Failed in topic", width="stretch", on_click=start_mcq_topic, args=(active_category, "Failed in topic"))
         with controls[4]:
-            st.button("Bookmarked in topic", width="stretch", on_click=start_mcq_topic, args=(active_category, "Bookmarked in topic", st.session_state.mcq_current_id))
-        st.caption(f"Current mode: {st.session_state.mcq_mode}")
+            st.button("Bookmarked in topic", width="stretch", on_click=start_mcq_topic, args=(active_category, "Bookmarked in topic"))
+        st.caption(f"Current session mode: {active_session['mode']}")
 
     if topic_row:
         summary1, summary2, summary3, summary4 = st.columns(4)
@@ -1586,23 +1871,22 @@ def render_mcq_page(
         summary3.metric("Failed", topic_row["Failed"])
         summary4.metric("Bookmarked", topic_row["Bookmarked"])
 
-    subset_active = st.session_state.mcq_subset_ids is not None
-    status = [f"{len(pool)} questions in current topic", f"Mode: {st.session_state.mcq_mode}"]
-    if subset_active:
-        status.append("Manual subset active")
-    st.caption(" | ".join(status))
-
-    if not pool:
-        st.info("No multiple-choice questions match this topic and mode.")
-        if st.session_state.mcq_mode != "All in topic":
-            st.button("Show all questions in this topic", width="stretch", on_click=start_mcq_topic, args=(active_category, "All in topic"))
-        return
+    session_remaining = mcq_session_remaining(active_session)
+    st.caption(
+        " | ".join(
+            [
+                f"Session position {current_index + 1}/{len(queue_ids)}",
+                f"Session remaining {session_remaining}",
+                f"Topic unseen overall {topic_row['Unseen'] if topic_row else 0}",
+            ]
+        )
+    )
 
     q_progress = progress_for(progress, item["id"])
     badges = [
         (source_label(item), "cool"),
         (primary_category(item), ""),
-        (f"Question {st.session_state.mcq_index + 1} / {len(pool)}", ""),
+        (f"Session {current_index + 1} / {len(queue_ids)}", ""),
         (f"Attempts {q_progress['attempts']}", ""),
     ]
     if item.get("source_count", 1) > 1:
@@ -1615,9 +1899,8 @@ def render_mcq_page(
 
     nav1, nav2, nav3 = st.columns([1, 1, 1])
     with nav1:
-        if st.button("Previous", disabled=st.session_state.mcq_index == 0, width="stretch"):
-            st.session_state.mcq_index -= 1
-            st.session_state.mcq_feedback = None
+        if st.button("Previous", disabled=current_index == 0, width="stretch"):
+            persist_mcq_index(user_id, active_session, current_index - 1)
             st.rerun()
     with nav2:
         bookmark_label = "Remove bookmark" if q_progress["bookmarked"] else "Bookmark"
@@ -1625,51 +1908,57 @@ def render_mcq_page(
             set_bookmark(user_id, item["id"], not bool(q_progress["bookmarked"]))
             st.rerun()
     with nav3:
-        if st.button("Next", disabled=st.session_state.mcq_index >= len(pool) - 1, width="stretch"):
-            st.session_state.mcq_index += 1
-            st.session_state.mcq_feedback = None
+        if st.button("Next", disabled=current_index >= len(queue_ids) - 1, width="stretch"):
+            persist_mcq_index(user_id, active_session, current_index + 1)
             st.rerun()
 
     with st.container(border=True):
         st.markdown("### Question")
         render_rich_text(item["question"])
 
-    is_multi_answer = len(item["answer_letters"]) > 1
-    with st.container(border=True):
-        st.markdown("### Choose your answer")
-        with st.form(key=f"mcq-form-{item['id']}"):
-            if is_multi_answer:
-                selection = st.multiselect(
-                    "Select all correct answers",
-                    options=[option_letter(i) for i in range(len(item["options"]))],
-                    format_func=lambda letter: choice_label(item, letter),
-                )
-            else:
-                selection = st.radio(
-                    "Select one answer",
-                    options=[option_letter(i) for i in range(len(item["options"]))],
-                    format_func=lambda letter: choice_label(item, letter),
-                    index=None,
-                )
-
-            submitted = st.form_submit_button("Check answer", width="stretch")
-            if submitted:
-                chosen = selection if isinstance(selection, list) else ([selection] if selection else [])
-                if not chosen:
-                    st.warning("Select an answer before submitting.")
+    if answer_state:
+        with st.container(border=True):
+            st.markdown("### Review")
+            show_mcq_feedback(item, answer_state)
+            st.caption("This question is locked for the current session so you can review it without losing your place.")
+    else:
+        is_multi_answer = len(item["answer_letters"]) > 1
+        with st.container(border=True):
+            st.markdown("### Choose your answer")
+            with st.form(key=f"mcq-form-{item['id']}"):
+                if is_multi_answer:
+                    selection = st.multiselect(
+                        "Select all correct answers",
+                        options=[option_letter(i) for i in range(len(item["options"]))],
+                        format_func=lambda letter: choice_label(item, letter),
+                    )
                 else:
-                    is_correct = set(chosen) == set(item["answer_letters"])
-                    record_attempt(user_id, item["id"], is_correct)
-                    if not is_correct and item["id"] not in st.session_state.mcq_missed_ids:
-                        st.session_state.mcq_missed_ids.append(item["id"])
-                    st.session_state.mcq_feedback = {
-                        "question_id": item["id"],
-                        "is_correct": is_correct,
-                        "selected_letters": chosen,
-                    }
-                    st.rerun()
+                    selection = st.radio(
+                        "Select one answer",
+                        options=[option_letter(i) for i in range(len(item["options"]))],
+                        format_func=lambda letter: choice_label(item, letter),
+                        index=None,
+                    )
 
-    show_mcq_feedback(item, st.session_state.mcq_feedback)
+                submitted = st.form_submit_button("Check answer", width="stretch")
+                if submitted:
+                    chosen = selection if isinstance(selection, list) else ([selection] if selection else [])
+                    if not chosen:
+                        st.warning("Select an answer before submitting.")
+                    else:
+                        is_correct = set(chosen) == set(item["answer_letters"])
+                        record_attempt(user_id, item["id"], is_correct)
+                        persist_mcq_answer(user_id, active_session, item["id"], chosen, is_correct)
+                        st.rerun()
+
+    if mcq_session_complete(active_session):
+        with st.container(border=True):
+            st.markdown("### Session complete")
+            st.success("You have answered every question in this frozen session.")
+            done1, done2, done3 = st.columns(3)
+            done1.button("Start fresh unseen", width="stretch", on_click=start_mcq_topic, args=(active_category, "Unseen only"))
+            done2.button("Review all in topic", width="stretch", on_click=start_mcq_topic, args=(active_category, "All in topic"))
+            done3.button("Back to topics", width="stretch", on_click=open_mcq_home)
 
 
 def render_problem_page(
@@ -1782,6 +2071,26 @@ def render_problem_page(
                 st.rerun()
 
 
+def bootstrap_navigation(user_state: dict[str, Any], active_mcq_session: dict[str, Any] | None) -> None:
+    if st.session_state.bootstrapped_navigation:
+        return
+
+    last_section = user_state.get("last_section")
+    if last_section in {"Overview", "Question browser", "Problems"}:
+        st.session_state.nav_section = last_section
+
+    if (
+        last_section == "Multiple choice"
+        and active_mcq_session
+        and user_state.get("last_mcq_question_id")
+    ):
+        st.session_state.nav_section = "Multiple choice"
+        st.session_state.mcq_active_category = active_mcq_session["category"]
+        st.session_state.mcq_sidebar_topic = active_mcq_session["category"]
+
+    st.session_state.bootstrapped_navigation = True
+
+
 def main() -> None:
     st.set_page_config(page_title="Exam Practice", layout="wide")
     inject_css()
@@ -1801,6 +2110,22 @@ def main() -> None:
 
     progress = load_progress(user_context["user_id"])
     user_state = load_user_state(user_context["user_id"])
+    active_mcq_session, session_dirty = normalize_mcq_session(load_mcq_session(user_context["user_id"]), mcq_bank_map(bank))
+    if active_mcq_session and not active_mcq_session.get("queue_ids"):
+        clear_mcq_session(user_context["user_id"])
+        active_mcq_session = None
+    elif active_mcq_session and session_dirty:
+        active_mcq_session = save_mcq_session(
+            user_context["user_id"],
+            active_mcq_session["category"],
+            active_mcq_session["mode"],
+            active_mcq_session["queue_ids"],
+            active_mcq_session["current_index"],
+            active_mcq_session["answers"],
+            started_at=active_mcq_session.get("started_at"),
+        )
+
+    bootstrap_navigation(user_state, active_mcq_session)
 
     st.sidebar.header("Navigation")
     if user_context["authenticated"]:
@@ -1821,9 +2146,9 @@ def main() -> None:
         st.session_state.nav_section = selected_section
 
     if st.session_state.nav_section == "Overview":
-        render_overview(bank, progress, report, user_context, user_state)
+        render_overview(bank, progress, report, user_context, active_mcq_session)
     elif st.session_state.nav_section == "Question browser":
-        render_browser_page(bank, progress, user_context, user_state)
+        render_browser_page(bank, progress, user_context, active_mcq_session)
     elif st.session_state.nav_section == "Multiple choice":
         render_mcq_page(bank, progress, report, user_context["user_id"], user_state)
     else:
