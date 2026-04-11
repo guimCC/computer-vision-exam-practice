@@ -1074,7 +1074,6 @@ def go_to_failed_mcq() -> None:
 def open_mcq_focus(question_id: str, category: str) -> None:
     st.session_state.nav_section = "Multiple choice"
     st.session_state.mcq_active_category = category
-    st.session_state.mcq_sidebar_topic = category
     st.session_state.mcq_session_request = {
         "category": category,
         "mode": "All in topic",
@@ -1095,19 +1094,16 @@ def open_problem_focus(question_id: str) -> None:
 def open_active_mcq_session(category: str | None) -> None:
     st.session_state.nav_section = "Multiple choice"
     st.session_state.mcq_active_category = category
-    st.session_state.mcq_sidebar_topic = category or "MCQ Home"
 
 
 def open_mcq_home() -> None:
     st.session_state.nav_section = "Multiple choice"
     st.session_state.mcq_active_category = None
-    st.session_state.mcq_sidebar_topic = "MCQ Home"
 
 
 def start_mcq_topic(category: str, mode: str, question_id: str | None = None) -> None:
     st.session_state.nav_section = "Multiple choice"
     st.session_state.mcq_active_category = category
-    st.session_state.mcq_sidebar_topic = category
     st.session_state.mcq_session_request = {
         "category": category,
         "mode": mode,
@@ -1821,7 +1817,6 @@ def render_mcq_page(
         )
         st.session_state.mcq_session_request = None
         st.session_state.mcq_active_category = active_session["category"]
-        st.session_state.mcq_sidebar_topic = active_session["category"]
 
     candidate = resume_candidate(active_session, topic_rows)
     expected_sidebar_topic = st.session_state.mcq_active_category or "MCQ Home"
