@@ -312,6 +312,12 @@ def inject_css() -> None:
             color: #bbe7ca;
             background: rgba(143, 208, 168, 0.12);
         }
+        .llm-copy-glyph {
+            font-size: 1rem;
+            line-height: 1;
+            font-weight: 700;
+            transform: translateY(-0.02rem);
+        }
         .topic-meta {
             color: var(--muted);
             font-size: 0.95rem;
@@ -808,13 +814,6 @@ def render_llm_copy_popover(item: dict[str, Any], answer_state: dict[str, Any] |
     button_id = "copy-" + hashlib.sha1(
         f"{item['id']}::{json.dumps(answer_state, sort_keys=True) if answer_state else 'blank'}".encode("utf-8")
     ).hexdigest()[:10]
-    svg = (
-        "<svg viewBox='0 0 24 24' width='15' height='15' aria-hidden='true' fill='none' "
-        "stroke='currentColor' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'>"
-        "<rect x='9' y='9' width='10' height='10' rx='2'></rect>"
-        "<path d='M15 9V7a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2'></path>"
-        "</svg>"
-    )
     st.html(
         f"""
         <div class="llm-copy-shell">
@@ -825,7 +824,7 @@ def render_llm_copy_popover(item: dict[str, Any], answer_state: dict[str, Any] |
                 title="Copy question and answers as text"
                 aria-label="Copy question and answers as text"
             >
-                {svg}
+                <span class="llm-copy-glyph" aria-hidden="true">⧉</span>
             </button>
         </div>
         <script>
