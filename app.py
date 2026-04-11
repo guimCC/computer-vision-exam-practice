@@ -730,6 +730,54 @@ def render_item_images(item: dict[str, Any]) -> None:
                 st.image(str(full_path), width=320)
 
 
+def llm_copy_text(item: dict[str, Any], answer_state: dict[str, Any] | None = None) -> str:
+    lines = [f"Type: {'Multiple choice' if item['type'] == 'multiple_choice' else 'Open response'}", ""]
+
+    if item["type"] == "multiple_choice":
+        lines.append("Question:")
+        lines.append(item["question"])
+        lines.append("")
+        lines.append("Options:")
+        for letter in [option_letter(i) for i in range(len(item["options"]))]:
+            lines.append(choice_label(item, letter))
+        if answer_state:
+            selected_letters = [letter for letter in answer_state.get("selected_letters", []) if letter in LETTERS]
+            if selected_letters:
+                lines.append("")
+                lines.append("My answer:")
+                for letter in selected_letters:
+                    lines.append(choice_label(item, letter))
+            lines.append("")
+            lines.append(f"Result: {'Correct' if answer_state.get('is_correct') else 'Incorrect'}")
+        lines.append("")
+        lines.append("Correct answer:")
+        for letter in item["answer_letters"]:
+            if letter in LETTERS:
+                lines.append(choice_label(item, letter))
+    else:
+        lines.append("Problem:")
+        lines.append(item["question"])
+        if item.get("solution_text"):
+            lines.append("")
+            lines.append("Stored answer:")
+            lines.append(item["solution_text"])
+
+    if item.get("solution_text") and item["type"] == "multiple_choice":
+        lines.append("")
+        lines.append("Explanation / solution:")
+        lines.append(item["solution_text"])
+
+    lines.append("")
+    lines.append(f"Source: {source_label(item)}")
+    return "\n".join(lines).strip()
+
+
+def render_llm_copy_popover(item: dict[str, Any], answer_state: dict[str, Any] | None = None) -> None:
+    with st.popover("LLM copy", width="stretch"):
+        st.caption("Copy this text into another model. The code block has a built-in copy button.")
+        st.code(llm_copy_text(item, answer_state), language="text", wrap_lines=True)
+
+
 def progress_for(progress: dict[str, dict[str, Any]], question_id: str) -> dict[str, Any]:
     return progress.get(
         question_id,
@@ -1605,7 +1653,11 @@ def render_browser_page(
     preview_left, preview_right = st.columns([1.35, 0.85])
     with preview_left:
         with st.container(border=True):
-            st.markdown("### Question")
+            header_left, header_right = st.columns([1, 0.3])
+            with header_left:
+                st.markdown("### Question")
+            with header_right:
+                render_llm_copy_popover(item)
             render_preserved_text(item["question"])
             render_item_images(item)
     with preview_right:
@@ -1961,7 +2013,11 @@ def render_mcq_page(
             st.rerun()
 
     with st.container(border=True):
-        st.markdown("### Question")
+        header_left, header_right = st.columns([1, 0.3])
+        with header_left:
+            st.markdown("### Question")
+        with header_right:
+            render_llm_copy_popover(item, answer_state)
         render_rich_text(item["question"])
 
     if answer_state:
@@ -2091,7 +2147,11 @@ def render_problem_page(
             st.rerun()
 
     with st.container(border=True):
-        st.markdown("### Problem statement")
+        header_left, header_right = st.columns([1, 0.3])
+        with header_left:
+            st.markdown("### Problem statement")
+        with header_right:
+            render_llm_copy_popover(item)
         render_preserved_text(item["question"])
         render_item_images(item)
 
