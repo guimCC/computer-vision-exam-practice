@@ -324,6 +324,28 @@ def inject_css() -> None:
             line-height: 1.55;
             margin-bottom: 0.45rem;
         }
+        .topic-progress {
+            width: 100%;
+            height: 0.58rem;
+            display: flex;
+            overflow: hidden;
+            border-radius: 999px;
+            background: rgba(16, 24, 36, 0.92);
+            border: 1px solid rgba(34, 50, 67, 0.75);
+            margin: 0.2rem 0 0.2rem 0;
+        }
+        .topic-progress-fill {
+            height: 100%;
+        }
+        .topic-progress-fill.is-mastered {
+            background: linear-gradient(135deg, rgba(141, 212, 197, 0.98) 0%, rgba(118, 200, 239, 0.95) 100%);
+        }
+        .topic-progress-fill.is-failed {
+            background: linear-gradient(135deg, rgba(235, 110, 110, 0.98) 0%, rgba(211, 73, 73, 0.95) 100%);
+        }
+        .topic-progress-fill.is-unseen {
+            background: rgba(23, 33, 46, 0.98);
+        }
         .sticky-anchor {
             display: none;
         }
@@ -1199,6 +1221,26 @@ def render_badges(labels: list[tuple[str, str]]) -> None:
     st.markdown(html, unsafe_allow_html=True)
 
 
+def render_topic_progress(row: dict[str, Any]) -> None:
+    total = max(int(row.get("Total", 0) or 0), 1)
+    failed = max(min(int(row.get("Failed", 0) or 0), total), 0)
+    answered = max(min(int(row.get("Answered", 0) or 0), total), 0)
+    unseen = max(min(int(row.get("Unseen", total - answered) or 0), total), 0)
+    mastered = max(answered - failed, 0)
+
+    segments = [
+        ("is-mastered", mastered),
+        ("is-failed", failed),
+        ("is-unseen", unseen),
+    ]
+    fills = "".join(
+        f'<div class="topic-progress-fill {css_class}" style="width:{(count / total) * 100:.4f}%"></div>'
+        for css_class, count in segments
+        if count > 0
+    )
+    st.markdown(f'<div class="topic-progress">{fills}</div>', unsafe_allow_html=True)
+
+
 def build_mcq_pool(
     items: list[dict[str, Any]],
     progress: dict[str, dict[str, Any]],
@@ -1990,7 +2032,7 @@ def render_mcq_home(
                 ),
                 unsafe_allow_html=True,
             )
-            st.progress(row["Completion"])
+            render_topic_progress(row)
             meta_left, meta_right = st.columns(2)
             meta_left.caption(f"{row['Total']} total")
             meta_right.caption(f"{completion_pct}% complete")
