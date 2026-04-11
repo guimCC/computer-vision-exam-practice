@@ -415,6 +415,8 @@ def ensure_progress_table(conn: sqlite3.Connection) -> None:
             bookmarked INTEGER NOT NULL DEFAULT 0,
             confidence_level INTEGER,
             confidence_updated_at TEXT,
+            notes_text TEXT,
+            notes_updated_at TEXT,
             PRIMARY KEY (user_id, question_id)
         )
         """
@@ -491,7 +493,9 @@ def init_db(default_user_id: str = LOCAL_USER_ID) -> None:
                         last_seen_at,
                         bookmarked,
                         confidence_level,
-                        confidence_updated_at
+                        confidence_updated_at,
+                        notes_text,
+                        notes_updated_at
                     )
                     SELECT
                         ?,
@@ -504,7 +508,9 @@ def init_db(default_user_id: str = LOCAL_USER_ID) -> None:
                         {legacy_col("last_seen_at", "NULL")},
                         {legacy_col("bookmarked", "0")},
                         {legacy_col("confidence_level", "NULL")},
-                        {legacy_col("confidence_updated_at", "NULL")}
+                        {legacy_col("confidence_updated_at", "NULL")},
+                        {legacy_col("notes_text", "NULL")},
+                        {legacy_col("notes_updated_at", "NULL")}
                     FROM progress_legacy
                     """,
                     (default_user_id,),
@@ -516,6 +522,10 @@ def init_db(default_user_id: str = LOCAL_USER_ID) -> None:
             conn.execute("ALTER TABLE progress ADD COLUMN confidence_level INTEGER")
         if "confidence_updated_at" not in columns:
             conn.execute("ALTER TABLE progress ADD COLUMN confidence_updated_at TEXT")
+        if "notes_text" not in columns:
+            conn.execute("ALTER TABLE progress ADD COLUMN notes_text TEXT")
+        if "notes_updated_at" not in columns:
+            conn.execute("ALTER TABLE progress ADD COLUMN notes_updated_at TEXT")
         ensure_user_state_table(conn)
         ensure_mcq_session_table(conn)
 
@@ -724,6 +734,25 @@ def set_confidence(user_id: str, question_id: str, confidence_level: int) -> Non
         )
 
 
+def save_notes(user_id: str, question_id: str, notes_text: str) -> None:
+    ensure_progress_row(user_id, question_id)
+    now = utc_now()
+    normalized = notes_text.strip()
+    stored_notes = normalized or None
+    stored_updated_at = now if stored_notes else None
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            """
+            UPDATE progress
+            SET notes_text = ?,
+                notes_updated_at = ?,
+                last_seen_at = ?
+            WHERE user_id = ? AND question_id = ?
+            """,
+            (stored_notes, stored_updated_at, now, user_id, question_id),
+        )
+
+
 def clear_mcq_topic_progress(user_id: str, bank: list[dict[str, Any]], category: str) -> None:
     question_ids = [
         item["id"]
@@ -769,6 +798,46 @@ def render_preserved_text(text: str) -> None:
         )
         rendered = block if markdown_like else block.replace("\n", "  \n")
         st.markdown(rendered)
+
+
+def render_question_notes(item: dict[str, Any], q_progress: dict[str, Any], user_id: str) -> None:
+    note_key = f"notes-editor-{item['id']}"
+    note_sync_key = f"{note_key}-sync"
+    persisted_notes = q_progress.get("notes_text") or ""
+    persisted_marker = q_progress.get("notes_updated_at") or ""
+    sync_payload = (persisted_notes, persisted_marker)
+    if st.session_state.get(note_sync_key) != sync_payload:
+        st.session_state[note_key] = persisted_notes
+        st.session_state[note_sync_key] = sync_payload
+
+    with st.expander("My notes"):
+        st.caption("Write short reminders for your future self. These notes are private to your account.")
+        if q_progress.get("notes_updated_at"):
+            st.caption(f"Last saved: {q_progress['notes_updated_at']}")
+        st.text_area(
+            "Notes",
+            key=note_key,
+            height=140,
+            placeholder="Why was this tricky? What should you remember next time?",
+            label_visibility="collapsed",
+        )
+        save_col, clear_col = st.columns(2)
+        if save_col.button("Save notes", key=f"save-notes-{item['id']}", width="stretch"):
+            save_notes(user_id, item["id"], st.session_state[note_key])
+            st.rerun()
+        if clear_col.button("Clear notes", key=f"clear-notes-{item['id']}", width="stretch"):
+            st.session_state[note_key] = ""
+            save_notes(user_id, item["id"], "")
+            st.rerun()
+
+
+def render_saved_notes_summary(q_progress: dict[str, Any]) -> None:
+    notes_text = (q_progress.get("notes_text") or "").strip()
+    if not notes_text:
+        return
+    with st.container(border=True):
+        st.markdown("### Your notes")
+        render_preserved_text(notes_text)
 
 
 def render_item_images(item: dict[str, Any]) -> None:
@@ -886,6 +955,8 @@ def progress_for(progress: dict[str, dict[str, Any]], question_id: str) -> dict[
             "bookmarked": 0,
             "confidence_level": None,
             "confidence_updated_at": None,
+            "notes_text": None,
+            "notes_updated_at": None,
         },
     )
 
@@ -2223,6 +2294,8 @@ def render_mcq_page(
         badges.append((f"Missed {q_progress['incorrect_count']}", "warm"))
     if q_progress["bookmarked"]:
         badges.append(("Bookmarked", "success"))
+    if q_progress.get("notes_text"):
+        badges.append(("Notes", "success"))
     render_badges(badges)
 
     nav1, nav2, nav3 = st.columns([1, 1, 1])
@@ -2247,12 +2320,14 @@ def render_mcq_page(
         with header_right:
             render_llm_copy_popover(item, answer_state)
         render_rich_text(item["question"])
+    render_question_notes(item, q_progress, user_id)
 
     if answer_state:
         with st.container(border=True):
             st.markdown("### Review")
             show_mcq_feedback(item, answer_state)
             st.caption("This question is locked for the current session so you can review it without losing your place.")
+        render_saved_notes_summary(q_progress)
     else:
         is_multi_answer = len(item["answer_letters"]) > 1
         with st.container(border=True):
@@ -2367,6 +2442,8 @@ def render_problem_page(
         badges.append(("Bookmarked", "success"))
     if q_progress["confidence_level"] is not None:
         badges.append((confidence_label(q_progress["confidence_level"]), "success"))
+    if q_progress.get("notes_text"):
+        badges.append(("Notes", "success"))
     render_badges(badges)
 
     nav1, nav2, nav3, nav4 = st.columns([1, 1.2, 1, 1])
@@ -2399,6 +2476,7 @@ def render_problem_page(
             render_llm_copy_popover(item)
         render_preserved_text(item["question"])
         render_item_images(item)
+    render_question_notes(item, q_progress, user_id)
 
     if show_solution:
         with st.container(border=True):
@@ -2407,7 +2485,9 @@ def render_problem_page(
                 render_preserved_text(item["solution_text"])
             else:
                 st.info("No stored solution text is available for this problem yet.")
+        render_saved_notes_summary(q_progress)
 
+        with st.container(border=True):
             st.markdown("### Confidence")
             st.caption("Rate how confident you felt before looking at the stored answer.")
             slider_key = f"problem-confidence-{item['id']}"
