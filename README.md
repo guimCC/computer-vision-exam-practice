@@ -1,28 +1,58 @@
-# Visio Exam Practice App
+# Computer Vision Exam Practice
 
-Deploy-only package for the mobile-friendly Streamlit version of the exam study tool.
+Mobile-friendly Streamlit app for practicing a deduplicated computer vision exam bank built from past exams and optional online quizzes.
 
-## What is included
+## What the app does
 
-- `app.py`: the Streamlit app
-- `question_bank.json`: the generated bank used at runtime
-- `build_report.json`: extraction/build summary
-- `assets/problem_images/`: extracted problem images
-- `.streamlit/config.toml`: default theme config for hosted deployment
-- `requirements.txt`: runtime dependencies for hosting
+- Multiple-choice practice with topic-based entry points
+- Per-user progress, bookmarks, failed-question tracking, and frozen MCQ sessions
+- Open-ended problem study with show/hide stored answers and extracted images
+- Question browser with filters by topic, source, year, and progress state
+- One-tap copy icon for exporting question text and answers into another LLM
 
-This folder intentionally does **not** include the raw `exams/` source material or the local progress database.
+The hosted app is designed for phone use first, but it also works on desktop.
+
+## What is in this repo
+
+- `app.py`: Streamlit application
+- `question_bank.json`: generated canonical question bank used at runtime
+- `build_report.json`: extraction summary for the generated bank
+- `assets/problem_images/`: extracted images linked to some open-ended problems
+- `.streamlit/config.toml`: default Streamlit theme config
+- `requirements.txt`: runtime dependencies
+
+This repo intentionally does not include the raw source material used to build the bank.
+
+## Current study model
+
+### Multiple choice
+
+- Practice starts from a topic chooser instead of dropping directly into a question
+- `Unseen only` creates a frozen session queue, so answered questions do not disappear mid-review
+- Answer review shows:
+  - all options
+  - your selected answer
+  - the correct answer
+  - explanation when available
+- Active sessions resume after reloads or weak connections
+
+### Problems
+
+- Problems are separate from MCQ
+- Stored answers can be shown or hidden while studying
+- Confidence can be marked per problem
+- Extracted images are rendered inline when available
 
 ## How progress works
 
-- If authentication is configured, progress is stored per signed-in user.
-- That means the same person can keep the same study status on laptop and phone.
-- Classmates do **not** share progress with each other as long as they log in with different accounts.
-- The app still uses a shared SQLite file on the server, but each row is keyed by both `user_id` and `question_id`.
+- If authentication is enabled, progress is stored per signed-in user
+- The same user can continue on laptop and phone with the same progress
+- Classmates do not share progress with each other if they log in with different accounts
+- Progress is stored in `progress.sqlite3` on the Streamlit host
 
-This is a lightweight setup. It avoids a hosted database, but it should still be treated as best-effort server-side storage.
+This is intentionally lightweight. It avoids a hosted database, but it should be treated as best-effort state rather than guaranteed durable storage.
 
-## Local run
+## Run locally
 
 ```bash
 python3 -m venv .venv
@@ -31,79 +61,41 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## GitHub + Streamlit Community Cloud
+## Deploy on Streamlit Community Cloud
 
-Recommended target account: `guimCC`
+1. Push this repo to GitHub
+2. Open [share.streamlit.io](https://share.streamlit.io/)
+3. Select:
+   - repository: this repo
+   - branch: `main`
+   - entrypoint: `app.py`
+4. Deploy
 
-### 1. Create a new GitHub repository
+After deployment, Streamlit gives you a hosted URL that you can open from your phone.
 
-Create a new repository under your personal account, for example:
+## Enable login so progress is private per user
 
-- `visio-exam-practice`
+The app supports Streamlit authentication with Google OIDC.
 
-Use a **private** repo unless you explicitly want the question bank public.
+References:
 
-### 2. Push this folder
-
-From inside this folder:
-
-```bash
-git init
-git add .
-git commit -m "Initial deployable study app"
-git branch -M main
-git remote add origin git@github.com:guimCC/visio-exam-practice.git
-git push -u origin main
-```
-
-If you prefer HTTPS:
-
-```bash
-git remote add origin https://github.com/guimCC/visio-exam-practice.git
-git push -u origin main
-```
-
-### 3. Deploy on Streamlit Community Cloud
-
-1. Go to [share.streamlit.io](https://share.streamlit.io/)
-2. Connect your GitHub account if needed
-3. Select the repository
-4. Branch: `main`
-5. Main file path: `app.py`
-6. Deploy
-
-After that you will get a hosted URL you can open from your phone.
-
-## Turn on login so progress is private per user
-
-Use Streamlit's built-in authentication with Google OIDC.
-
-Reference APIs:
-
+- [Streamlit authentication docs](https://docs.streamlit.io/develop/concepts/connections/authentication)
 - [st.login / st.logout / st.user](https://docs.streamlit.io/develop/api-reference/user)
-- [Authentication concepts](https://docs.streamlit.io/develop/concepts/connections/authentication)
 
 ### 1. Create a Google OAuth client
 
 In Google Cloud:
 
 - create an OAuth client of type `Web application`
-- add the authorized redirect URI:
+- add this authorized redirect URI:
 
 ```text
 https://YOUR-APP-URL.streamlit.app/oauth2callback
 ```
 
-Use the final deployed Streamlit app URL there.
-
 ### 2. Add Streamlit secrets
 
-In Streamlit Community Cloud, open the app settings and add secrets based on:
-
-- `.streamlit/secrets.example.toml`
-- your local `.streamlit/secrets.toml`
-
-Template:
+In Streamlit Community Cloud, open the app settings and paste secrets using this shape:
 
 ```toml
 [auth]
@@ -114,20 +106,38 @@ client_secret = "your-google-oauth-client-secret"
 server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
 ```
 
+There is a local template at `.streamlit/secrets.example.toml`.
+
 ### 3. Redeploy
 
-After secrets are added, redeploy the app.
+After saving secrets, reboot or redeploy the app.
 
-Once enabled:
+Expected behavior:
 
-- you sign in with the same account on laptop and phone -> same progress
-- teammates sign in with their own accounts -> separate progress
-- if auth is not configured, the app falls back to a local guest mode
+- same Google account on laptop and phone -> same progress
+- different Google accounts -> separate progress
+- no auth configured -> fallback guest mode
 
-Locally, you already have an ignored `.streamlit/secrets.toml` file ready to fill in with your real values.
+## Known limitations
 
-## Important note about progress
+- Progress is server-side SQLite, not a fully durable hosted database
+- There is no offline mode or background sync
+- Rebuilding the question bank is not part of this repo; this repo is runtime-only
 
-The app stores progress in `progress.sqlite3`.
+## Runtime files you should not commit
 
-On hosted Streamlit this is acceptable for a lightweight personal setup, but you should treat it as best-effort state, not guaranteed durable storage. If you ever want stronger durability, the next step would be moving progress to a hosted database.
+- `.streamlit/secrets.toml`
+- `progress.sqlite3`
+- `__pycache__/`
+
+## If you need to rebuild the bank
+
+This deploy repo is runtime-only. Use the local builder project in:
+
+- [study_tool](/Users/guimcc/Library/Mobile%20Documents/com~apple~CloudDocs/MatCad/4t/Visió/study_tool)
+
+That folder contains:
+
+- `build_bank.py`
+- the original local README for extraction/rebuild flow
+- the local copy of the app
