@@ -873,6 +873,10 @@ def progress_for(progress: dict[str, dict[str, Any]], question_id: str) -> dict[
     )
 
 
+def has_outstanding_failure(row: dict[str, Any]) -> bool:
+    return row.get("incorrect_count", 0) > 0 and row.get("last_result") != 1
+
+
 def mcq_bank_map(bank: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return {item["id"]: item for item in bank if item["type"] == "multiple_choice"}
 
@@ -974,12 +978,19 @@ def persist_mcq_answer(
         "is_correct": is_correct,
         "answered_at": utc_now(),
     }
+    queue_ids = list(session.get("queue_ids", []))
+    current_index = int(session.get("current_index", 0))
+    if session.get("mode") == "Failed in topic" and is_correct and question_id in queue_ids:
+        answers.pop(question_id, None)
+        resolved_index = queue_ids.index(question_id)
+        queue_ids.pop(resolved_index)
+        current_index = min(resolved_index, len(queue_ids) - 1) if queue_ids else 0
     return save_mcq_session(
         user_id,
         session["category"],
         session["mode"],
-        list(session.get("queue_ids", [])),
-        int(session.get("current_index", 0)),
+        queue_ids,
+        current_index,
         answers,
         started_at=session.get("started_at"),
     )
@@ -1113,7 +1124,7 @@ def build_mcq_pool(
     if mode == "Unseen only":
         pool = [item for item in pool if progress_for(progress, item["id"])["attempts"] == 0]
     elif mode == "Failed in topic":
-        pool = [item for item in pool if progress_for(progress, item["id"])["incorrect_count"] > 0]
+        pool = [item for item in pool if has_outstanding_failure(progress_for(progress, item["id"]))]
     elif mode == "Bookmarked in topic":
         pool = [item for item in pool if progress_for(progress, item["id"])["bookmarked"]]
 
@@ -1309,7 +1320,7 @@ def category_rows(bank: list[dict[str, Any]], progress: dict[str, dict[str, Any]
         q_progress = progress_for(progress, item["id"])
         if item_has_activity(q_progress):
             bucket["started"] += 1
-        if q_progress["incorrect_count"] > 0:
+        if has_outstanding_failure(q_progress):
             bucket["incorrect"] += 1
         if q_progress["bookmarked"]:
             bucket["bookmarked"] += 1
@@ -1343,7 +1354,7 @@ def mcq_topic_rows(bank: list[dict[str, Any]], progress: dict[str, dict[str, Any
             bucket["answered"] += 1
         else:
             bucket["unseen"] += 1
-        if row["incorrect_count"] > 0:
+        if has_outstanding_failure(row):
             bucket["failed"] += 1
         if row["bookmarked"]:
             bucket["bookmarked"] += 1
@@ -1443,7 +1454,7 @@ def filter_browser_items(
     elif progress_mode == "Started":
         items = [item for item in items if item_has_activity(progress_for(progress, item["id"]))]
     elif progress_mode == "Incorrect MCQ":
-        items = [item for item in items if progress_for(progress, item["id"])["incorrect_count"] > 0]
+        items = [item for item in items if has_outstanding_failure(progress_for(progress, item["id"]))]
     elif progress_mode == "Bookmarked":
         items = [item for item in items if progress_for(progress, item["id"])["bookmarked"]]
     elif progress_mode == "Low confidence problems":
@@ -1481,7 +1492,7 @@ def render_stats(bank: list[dict[str, Any]], progress: dict[str, dict[str, Any]]
     mcq_items = [item for item in bank if item["type"] == "multiple_choice"]
     problem_items = [item for item in bank if item["type"] == "open_response"]
     seen_count = sum(1 for item in mcq_items if progress_for(progress, item["id"])["attempts"] > 0)
-    failed_count = sum(1 for item in mcq_items if progress_for(progress, item["id"])["incorrect_count"] > 0)
+    failed_count = sum(1 for item in mcq_items if has_outstanding_failure(progress_for(progress, item["id"])))
     bookmarked_count = sum(1 for row in progress.values() if row["bookmarked"])
     rated_problems = [progress_for(progress, item["id"])["confidence_level"] for item in problem_items]
     rated_values = [value for value in rated_problems if value is not None]
@@ -1662,7 +1673,7 @@ def render_browser_page(
     )
 
     started_count = sum(1 for item in filtered_items if item_has_activity(progress_for(progress, item["id"])))
-    incorrect_count = sum(1 for item in filtered_items if progress_for(progress, item["id"])["incorrect_count"] > 0)
+    incorrect_count = sum(1 for item in filtered_items if has_outstanding_failure(progress_for(progress, item["id"])))
     bookmarked_count = sum(1 for item in filtered_items if progress_for(progress, item["id"])["bookmarked"])
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Filtered questions", len(filtered_items))
@@ -1923,10 +1934,7 @@ def render_mcq_page(
     categories = [row["Category"] for row in topic_rows]
 
     active_session, session_dirty = normalize_mcq_session(load_mcq_session(user_id), bank_map)
-    if active_session and not active_session.get("queue_ids"):
-        clear_mcq_session(user_id)
-        active_session = None
-    elif active_session and session_dirty:
+    if active_session and session_dirty:
         active_session = save_mcq_session(
             user_id,
             active_session["category"],
@@ -1994,12 +2002,18 @@ def render_mcq_page(
     topic_row = topic_stats(topic_rows, active_category)
 
     if not queue_ids:
+        empty_subtitle = "There is no active queue in this topic right now."
+        if active_session["mode"] == "Failed in topic":
+            empty_subtitle = "You have cleared the failed-question queue for this topic."
         render_page_heading(
             "Multiple choice",
             active_category,
-            "There is no active queue in this topic right now.",
+            empty_subtitle,
         )
-        st.info("This session has no questions left. Start a fresh unseen session or review the full topic.")
+        if active_session["mode"] == "Failed in topic":
+            st.success("No failed questions are left in this topic right now.")
+        else:
+            st.info("This session has no questions left. Start a fresh unseen session or review the full topic.")
         empty_left, empty_mid, empty_right = st.columns(3)
         empty_left.button("Start fresh unseen", width="stretch", on_click=start_mcq_topic, args=(active_category, "Unseen only"))
         empty_mid.button("Review all in topic", width="stretch", on_click=start_mcq_topic, args=(active_category, "All in topic"))
@@ -2299,10 +2313,7 @@ def main() -> None:
     progress = load_progress(user_context["user_id"])
     user_state = load_user_state(user_context["user_id"])
     active_mcq_session, session_dirty = normalize_mcq_session(load_mcq_session(user_context["user_id"]), mcq_bank_map(bank))
-    if active_mcq_session and not active_mcq_session.get("queue_ids"):
-        clear_mcq_session(user_context["user_id"])
-        active_mcq_session = None
-    elif active_mcq_session and session_dirty:
+    if active_mcq_session and session_dirty:
         active_mcq_session = save_mcq_session(
             user_context["user_id"],
             active_mcq_session["category"],
