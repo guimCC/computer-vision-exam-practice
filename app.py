@@ -1518,6 +1518,39 @@ def mcq_topic_rows(bank: list[dict[str, Any]], progress: dict[str, dict[str, Any
     return rows
 
 
+def problem_category_rows(items: list[dict[str, Any]], progress: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    counters: dict[str, Counter[str]] = {}
+    for item in items:
+        if item["type"] != "open_response":
+            continue
+        category = primary_category(item)
+        bucket = counters.setdefault(category, Counter())
+        row = progress_for(progress, item["id"])
+        bucket["total"] += 1
+        if row["confidence_level"] is None:
+            bucket["no_confidence"] += 1
+        elif row["confidence_level"] <= 2:
+            bucket["low_confidence"] += 1
+        else:
+            bucket["confident"] += 1
+        if row["bookmarked"]:
+            bucket["bookmarked"] += 1
+
+    rows: list[dict[str, Any]] = []
+    for category, bucket in sorted(counters.items(), key=lambda entry: (-entry[1]["total"], entry[0])):
+        rows.append(
+            {
+                "Category": category,
+                "Problems": bucket["total"],
+                "No confidence": bucket["no_confidence"],
+                "Low confidence (1-2)": bucket["low_confidence"],
+                "Confident (3-5)": bucket["confident"],
+                "Bookmarked": bucket["bookmarked"],
+            }
+        )
+    return rows
+
+
 def topic_stats(topic_rows: list[dict[str, Any]], category: str | None) -> dict[str, Any] | None:
     if not category:
         return None
@@ -2456,6 +2489,10 @@ def render_problem_page(
     if st.session_state.problem_categories:
         status.append("Categories: " + ", ".join(st.session_state.problem_categories))
     st.caption(" | ".join(status))
+    problem_rows = problem_category_rows(pool, progress)
+    if problem_rows:
+        with st.expander("Category breakdown for this filtered problem set", expanded=False):
+            st.dataframe(problem_rows, width="stretch", hide_index=True)
 
     if not pool:
         save_user_state(user_id, last_section="Problems", last_problem_filter=st.session_state.problem_mode)
